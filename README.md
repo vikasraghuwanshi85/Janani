@@ -93,12 +93,12 @@ The supplied V79 Apps Script only maps a header called `Vehicle`, while October 
 ## Bill and odometer safeguards
 
 - Bills are identified by decoded image bytes and stable WhatsApp message IDs. Repeated bills are filtered within a run and against saved history, including during forced runs. Compatible history from older versions is also recognized.
-- A bill uses the date written in its caption, falling back to the WhatsApp message date. Dates use day/month/year. Missing or invalid dates cause the bill to be skipped rather than assigned today's folder.
+- A bill uses its caption date, falling back to WhatsApp metadata, timestamp tooltips, or the nearest preceding visible date separator. Dates use day/month/year. Missing or invalid dates cause the bill to be skipped rather than assigned today's folder. Apply the [Apps Script bill-folder fix](apps_script/BILL_FOLDERS.md) to upload into the configured parent's `DD-MM-YYYY` folders and stop acknowledging failed uploads.
 - The payload includes `date_folder` as `DD-MM-YYYY`, `original_date`, `image_hash`, and an `idempotency_key`. The deployed Apps Script must honor the date and image identity when creating Drive files. Python does not create Drive folders directly.
 - Odometer parsing reads one numeric value, supports comma-grouped readings, and avoids joining extra numbers into the reading. Invalid or suspicious pairs are skipped with a warning. An attached stray digit whose intended value is ambiguous is not guessed; correct the source message before retrying.
 - History is saved atomically after an acknowledged success or duplicate response. A corrupt history file stops processing instead of silently treating every bill as new. A process lock prevents simultaneous syncs sharing the same history file.
 
-Exactly-once uploads after a lost webhook response require server-side idempotency in Apps Script. Python cannot establish whether a timed-out request already created a Drive file. Different encodings of the same visual image may also need server-side handling when they come from different WhatsApp messages. Existing duplicate Drive files and incorrect spreadsheet rows are not automatically removed or repaired.
+Retries after a lost webhook response require server-side idempotency in Apps Script. The bill-folder helper reuses files by verified image bytes and repairs incomplete log writes; Python alone cannot establish whether a timed-out request already created a Drive file. Different encodings of the same visual image may also need server-side handling when they come from different WhatsApp messages. Existing duplicate Drive files and incorrect spreadsheet rows are not automatically removed or repaired.
 
 ## Logs and troubleshooting
 

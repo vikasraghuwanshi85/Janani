@@ -135,8 +135,6 @@ ALL_KEYS_PATTERN = (r"(?<!\w)(?:" + "|".join(
 
 def clean_text_for_parsing(text):
     if not text: return text
-    if "Janani Reporting" in text and text.count(",") >= 4:
-        return text.split(",")[0].strip()
     return text
 
 def get_field(key, text):
@@ -178,10 +176,10 @@ def get_field(key, text):
 
 def parse_odometer(value):
     # Read one number, never concatenate a timestamp or the next field's digits.
-    match = re.match(r"\s*(\d{1,3}(?:,\d{3})+|\d+)(?![\d,])", value)
+    match = re.match(r"\s*(\d{1,3}(?:[,.]\s*\d{3})+|\d{1,2}(?:,\s*\d{2})+,\s*\d{3}|\d+)(?![\d,.])", value)
     if not match:
         return ""
-    number = match.group(1).replace(",", "")
+    number = re.sub(r"[,.\s]", "", match.group(1))
     return number if len(number) <= 7 else ""
 
 
@@ -338,6 +336,10 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
     
     cleaned = clean_text_for_parsing(text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text)
     date_str = get_field("Date", text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text)
+    # A labelled date may be followed by WhatsApp's time/status text on the same line.
+    date_prefix = re.match(r"\s*(\d{1,2}[/\-]\d{1,2}[/\-](?:\d{4}|\d{2}))(?!\d)", date_str)
+    if date_prefix:
+        date_str = date_prefix.group(1)
     if not date_str:
         m = re.search(r"^\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", cleaned)
         if m: date_str = m.group(1)
@@ -664,6 +666,69 @@ def scroll_and_collect_with_image_fix(driver, days=30):
     for i in range(max_scrolls):
         try:
             messages = driver.execute_script(r"""
+                function calendarDate(day, month, year) {
+                    if(year < 100) year += 2000;
+                    let date = new Date(year, month - 1, day);
+                    if(date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return '';
+                    return String(day).padStart(2, '0') + '/' + String(month).padStart(2, '0') + '/' + year;
+                }
+                function messageDateText(value) {
+                    let text = String(value || '').replace(/[\u200e\u200f]/g, '').trim();
+                    let match = text.match(/(?:^|[^\d])(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4}|\d{2})(?!\d)/);
+                    if(match) return calendarDate(Number(match[1]), Number(match[2]), Number(match[3]));
+                    match = text.match(/(?:^|[^\d])(\d{4})-(\d{2})-(\d{2})(?!\d)/);
+                    if(match) return calendarDate(Number(match[3]), Number(match[2]), Number(match[1]));
+                    let now = new Date(), lower = text.toLowerCase();
+                    if(lower === 'today' || lower === 'yesterday') {
+                        if(lower === 'yesterday') now.setDate(now.getDate() - 1);
+                        return calendarDate(now.getDate(), now.getMonth() + 1, now.getFullYear());
+                    }
+                    let weekdays = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+                    if(weekdays.includes(lower)) {
+                        let difference = (now.getDay() - weekdays.indexOf(lower) + 7) % 7;
+                        now.setDate(now.getDate() - (difference || 7));
+                        return calendarDate(now.getDate(), now.getMonth() + 1, now.getFullYear());
+                    }
+                    match = text.match(/^(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(?:\s*,?\s*(\d{4}))?$/i);
+                    if(match) {
+                        let months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+                        return calendarDate(Number(match[1]), months.indexOf(match[2].slice(0,3).toLowerCase()) + 1, Number(match[3] || now.getFullYear()));
+                    }
+                    return '';
+                }
+                function dateForMessage(node, idNode) {
+                    let scope = idNode || node;
+                    let metadataNodes = [node, scope, node.closest('[data-pre-plain-text]'), ...scope.querySelectorAll('[data-pre-plain-text]')].filter(Boolean);
+                    for(let item of metadataNodes) {
+                        let date = messageDateText(item.getAttribute('data-pre-plain-text'));
+                        if(date) return date;
+                    }
+                    for(let item of [scope, ...scope.querySelectorAll('[title], [aria-label], [data-tooltip-text]')]) {
+                        for(let name of ['title','aria-label','data-tooltip-text']) {
+                            // Timestamp attributes must contain an actual calendar date, not just a time.
+                            let value = item.getAttribute(name) || '';
+                            if(!/\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}-\d{2}-\d{2}/.test(value)) continue;
+                            let date = messageDateText(value);
+                            if(date) return date;
+                        }
+                    }
+                    let conversation = scope.closest('#main, [data-testid="conversation-panel-messages"]') || document.querySelector('#main') || scope.parentElement;
+                    let nearest = '';
+                    if(conversation) {
+                        for(let heading of conversation.querySelectorAll('div, span')) {
+                            // Never borrow a date written inside another message or a future separator.
+                            if(heading.closest('[data-id], [data-testid="msg-container"], .message-in, .message-out')) continue;
+                            if(heading.contains(scope) || heading.querySelector('[data-id], [data-testid="msg-container"], .message-in, .message-out')) continue;
+                            if(!(heading.compareDocumentPosition(scope) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+                            let text = (heading.innerText || heading.textContent || '').trim();
+                            if(text.length > 40) continue;
+                            if(!/^(?:\d{1,2}[\/\-]\d{1,2}[\/\-](?:\d{4}|\d{2})|\d{4}-\d{2}-\d{2}|today|yesterday|sunday|monday|tuesday|wednesday|thursday|friday|saturday|\d{1,2}\s+[a-z]+(?:\s*,?\s*\d{4})?)$/i.test(text)) continue;
+                            let date = messageDateText(text);
+                            if(date) nearest = date;
+                        }
+                    }
+                    return nearest;
+                }
                 let result = [];
                 const selectors = [
                     'div[data-testid="msg-container"]',
@@ -723,10 +788,8 @@ def scroll_and_collect_with_image_fix(driver, days=30):
                     if(n.querySelector('[data-testid="image-thumb"]')){ hasImage = true; imgCount = Math.max(imgCount, 1); }
                     let idNode = n.closest('[data-id]') || n.querySelector('[data-id]');
                     let messageId = idNode ? idNode.getAttribute('data-id') : '';
-                    let dateNode = n.matches('[data-pre-plain-text]') ? n : n.querySelector('[data-pre-plain-text]');
-                    let metadata = dateNode ? dateNode.getAttribute('data-pre-plain-text') : '';
-                    let dateMatch = (metadata || '').match(/(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/);
-                    result.push({messageId: messageId, messageDate: dateMatch ? dateMatch[1] : '', idx: idx, text: text || (isForwarded ? '[FORWARDED_BILL_IMAGE]' : '[IMAGE_ONLY_BILL]'), hasImage: hasImage, imgCount: imgCount, isForwarded: isForwarded, textLength: text.length});
+                    let messageDate = dateForMessage(n, idNode);
+                    result.push({messageId: messageId, messageDate: messageDate, idx: idx, text: text || (isForwarded ? '[FORWARDED_BILL_IMAGE]' : '[IMAGE_ONLY_BILL]'), hasImage: hasImage, imgCount: imgCount, isForwarded: isForwarded, textLength: text.length});
                 });
                 return result;
             """)
@@ -739,7 +802,9 @@ def scroll_and_collect_with_image_fix(driver, days=30):
                     has_img = msg.get('hasImage', False)
                     if not has_img and len(txt) < 10: continue
                     h = msg.get("messageId") or hashlib.sha256((txt + msg.get("messageDate", "")).encode("utf-8")).hexdigest()
-                    if h not in collected:
+                    if h in collected and not collected[h].get("message_date") and msg.get("messageDate"):
+                        collected[h]["message_date"] = msg["messageDate"]
+                    if h not in collected or (has_img and not collected[h].get("image_data")):
                         image_data = ""
                         legacy_image_hash = ""
                         if has_img:

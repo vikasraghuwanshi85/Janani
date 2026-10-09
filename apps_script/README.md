@@ -29,7 +29,7 @@ Do not run a synthetic insert against the production spreadsheet as a test. The 
 
 This fix applies to incoming records. Existing blank IDs and duplicate rows are not silently edited or deleted. Records already in Python's push history will not automatically replay; do not use `--force` indiscriminately to fill old rows. Existing rows with blank vehicle IDs cannot match a vehicle-aware duplicate check and may be duplicated if resent. Backfilling those rows needs a separate source-based reconciliation.
 
-Bill upload and dashboard behavior remain in your existing V79 code. In particular, its bill folder uses the two-digit year and its upload code can acknowledge a bill without a Drive link; those behaviors are outside this vehicle-column patch. No live deployment or sheet changes are performed by committing these files.
+The vehicle-column helper changes only fuel writes. For missing bill dates and the V79 Drive folder/acknowledgment bugs, also apply the [bill-folder fix](BILL_FOLDERS.md). Dashboard behavior remains in your existing code. No live deployment or sheet changes are performed by committing these files.
 
 ## Local validation
 

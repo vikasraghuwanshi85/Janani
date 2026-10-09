@@ -45,6 +45,22 @@ class ParsingTests(unittest.TestCase):
     def test_comma_readings(self):
         self.assertEqual(app.parse_message(fuel('361,260', '360,541'))['payload']['total_km'], '719')
 
+    def test_grouped_odometer_formats_from_skip_log(self):
+        for value in ['447,194', '447, 194', '4,47,194', '447.194']:
+            with self.subTest(value=value):
+                payload = app.parse_message(fuel(value, '446611'))['payload']
+                self.assertEqual(payload['present_odo'], '447194')
+                self.assertEqual(payload['total_km'], '583')
+
+    def test_decimal_or_malformed_odometer_not_truncated(self):
+        for value in ['447.19', '447,19', '447.1944']:
+            with self.subTest(value=value):
+                self.assertEqual(app.parse_odometer(value), '')
+
+    def test_reporting_footer_does_not_truncate_message_at_comma(self):
+        message = fuel('447,194', '446,611') + '\nJanani Reporting, footer, metadata, more, data'
+        self.assertEqual(app.parse_message(message)['payload']['total_km'], '583')
+
     def test_long_alias(self):
         text = fuel('361260', '360541').replace('Present odo -', 'Present Odo Reading -')
         self.assertEqual(app.parse_message(text)['payload']['present_odo'], '361260')
@@ -68,6 +84,10 @@ class ParsingTests(unittest.TestCase):
     def test_no_date_or_invalid_date_skips_bill(self):
         self.assertIsNone(app.parse_message('[IMAGE_ONLY_BILL]', IMAGE))
         self.assertIsNone(bill('31/02/2026'))
+
+    def test_bill_caption_date_with_display_time(self):
+        payload = app.parse_message('Date - 08/10/2026 10:30 AM\nVehicle no - 7412', IMAGE)['payload']
+        self.assertEqual(payload['date_folder'], '08-10-2026')
 
     def test_caption_date_overrides_message_date(self):
         p = app.parse_message('Date - 06/10/2026', IMAGE, message_date='08/10/2026')['payload']
