@@ -112,7 +112,8 @@ Run `run_windows.bat --check-webhook` to test the configured URL without opening
 | --- | --- |
 | Missing Python environment | Run `setup_windows.bat` and confirm `.venv\Scripts\python.exe` exists |
 | Chrome cannot start | Check the browser/driver versions and configured paths; close other Chrome instances using the Janani profile |
-| QR screen or group not found | Reconnect WhatsApp and check the exact group name |
+| WhatsApp login did not complete | Scan QR in the Chrome window opened by Janani, and allow chats to load within the 180-second wait. Login in another browser profile does not log in this one. Group search is skipped on timeout. |
+| Group not found after login | Confirm the logged-in account belongs to the group. Set `group_name` in `sheet_config.json` to the exact visible name, including any emoji. Search uses the chat sidebar and exact names. |
 | Bill skipped for its date | Add a valid date to the caption or check that WhatsApp message-date metadata is available |
 | Suspicious odometer warning | Correct the source reading; use `--debug-fuel` to inspect parsing |
 | Upload timeout or webhook error | Inspect the Apps Script deployment, access permissions, and execution logs before retrying |

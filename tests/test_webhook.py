@@ -423,5 +423,54 @@ class WindowsCompatibilityTests(unittest.TestCase):
         ast.parse(SOURCE.read_text(), feature_version=(3, 8))
 
 
+class WhatsAppLoginTests(unittest.TestCase):
+    def test_login_timeout_never_searches_or_collects(self):
+        driver = Mock()
+        driver.find_elements.return_value = []
+        with patch.object(app, 'create_driver_universal', return_value=driver), patch.object(app, 'find_group') as search, patch.object(app, 'wait_for_whatsapp_login', side_effect=lambda d: app_wait(d, timeout=2)), patch.object(app.time, 'sleep'), patch('builtins.print'):
+            self.assertEqual(app.read_last_n_days(1), ([], set()))
+        search.assert_not_called()
+        driver.quit.assert_called_once()
+
+    def test_hidden_sidebar_does_not_confirm_login(self):
+        driver = Mock()
+        driver.find_elements.return_value = [Mock(is_displayed=Mock(return_value=False))]
+        with patch.object(app.time, 'sleep'), patch('builtins.print'):
+            self.assertFalse(app.wait_for_whatsapp_login(driver, timeout=2))
+
+    def test_visible_sidebar_confirms_login_without_wait(self):
+        driver = Mock()
+        driver.find_elements.return_value = [Mock(is_displayed=Mock(return_value=True))]
+        with patch.object(app.time, 'sleep') as sleep, patch('builtins.print'):
+            self.assertTrue(app.wait_for_whatsapp_login(driver, timeout=2))
+        sleep.assert_not_called()
+
+    def test_group_search_only_clicks_exact_sidebar_match(self):
+        driver = Mock()
+        box = Mock(is_displayed=Mock(return_value=True))
+        wrong = Mock(is_displayed=Mock(return_value=True))
+        wrong.get_attribute.return_value = 'Janani Other Group'
+        right = Mock(is_displayed=Mock(return_value=True))
+        right.get_attribute.return_value = 'Janani AI Reporting'
+        driver.find_elements.side_effect = [[box], [wrong, right]]
+        with patch.object(app.time, 'sleep'), patch('builtins.print'):
+            self.assertTrue(app.find_group(driver, app.GROUP_NAME))
+        wrong.click.assert_not_called()
+        right.click.assert_called_once()
+        for call in driver.find_elements.call_args_list:
+            self.assertIn('#side', call.args[1])
+        box.send_keys.assert_any_call(app.GROUP_NAME)
+
+    def test_missing_sidebar_search_does_not_use_message_composer(self):
+        driver = Mock()
+        driver.find_elements.return_value = []
+        with patch.object(app.time, 'sleep'), patch('builtins.print'):
+            self.assertFalse(app.find_group(driver, app.GROUP_NAME))
+        driver.find_element.assert_not_called()
+        driver.execute_script.assert_not_called()
+
+
+app_wait = app.wait_for_whatsapp_login
+
 if __name__ == '__main__':
     unittest.main()

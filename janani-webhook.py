@@ -685,13 +685,32 @@ def create_driver_universal():
             "set JANANI_CHROME_BINARY and JANANI_CHROMEDRIVER. Details: " + str(exc)
         ) from exc
 
+def wait_for_whatsapp_login(driver, timeout=180):
+    print(f'[LOGIN] Waiting up to {timeout}s. Scan the QR code in the Chrome window opened by Janani.')
+    for elapsed in range(timeout):
+        sidebar = driver.find_elements(By.CSS_SELECTOR, '#side, #pane-side')
+        if any(element.is_displayed() for element in sidebar):
+            print(f'[OK] WhatsApp chat sidebar ready after {elapsed}s')
+            return True
+        if elapsed and elapsed % 30 == 0:
+            print(f'[LOGIN] Still waiting ({elapsed}s): complete QR login and let chats finish loading.')
+        time.sleep(1)
+    print('[FAIL] WhatsApp login did not complete or the chat sidebar did not load. '
+          'Check the Chrome window, internet connection, and QR login; group search was not attempted.')
+    return False
+
+
 def find_group(driver, group_name):
     aliases = GROUP_ALIASES if group_name == GROUP_NAME else [group_name] + GROUP_ALIASES
     for attempt_name in aliases:
         try:
             print(f"[INFO] Searching for group: {attempt_name}")
             try:
-                search_box = driver.find_element(By.XPATH, '//div[@contenteditable="true"][@data-tab="3"] | //div[@title="Search or start new chat"] | //div[@contenteditable="true"]')
+                boxes = driver.find_elements(By.CSS_SELECTOR,
+                    '#side [contenteditable="true"][role="textbox"], '
+                    '#side [contenteditable="true"], '
+                    '[data-testid="chat-list-search"] [contenteditable="true"]')
+                search_box = next(box for box in boxes if box.is_displayed())
                 search_box.click()
                 time.sleep(0.5)
                 search_box.send_keys(Keys.CONTROL + "a")
@@ -699,13 +718,15 @@ def find_group(driver, group_name):
                 time.sleep(0.5)
                 search_box.send_keys(attempt_name)
                 time.sleep(2)
-            except: pass
-            elems = driver.find_elements(By.XPATH, f'//span[@title="{attempt_name}"] | //span[contains(@title, "{attempt_name}")]')
+            except Exception as exc:
+                print(f'[WARN] Could not use the WhatsApp sidebar search: {exc}')
+                continue
+            elems = driver.find_elements(By.CSS_SELECTOR, '#pane-side [title], #side [role="listitem"] [title]')
             for elem in elems:
                 try:
                     title = (elem.get_attribute("title") or elem.text or "").strip()
-                    if not title or len(title) < 3: continue
-                    if "janani" in title.lower() or attempt_name.lower() in title.lower():
+                    if not elem.is_displayed(): continue
+                    if ' '.join(title.split()).casefold() == ' '.join(attempt_name.split()).casefold():
                         try:
                             elem.click()
                             time.sleep(4)
@@ -990,18 +1011,14 @@ def read_last_n_days(days=30):
         return [], set()
     try:
         driver.get("https://web.whatsapp.com")
-        print("Waiting login 90s - Scan QR")
-        for i in range(90):
-            time.sleep(1)
-            try:
-                driver.find_element(By.XPATH, '//div[@id="side"] | //div[@id="pane-side"]')
-                if len(driver.find_elements(By.XPATH, '//canvas[@aria-label="Scan me!"]')) == 0:
-                    print(f"[OK] Logged in after {i}s")
-                    break
-            except: pass
+        if not wait_for_whatsapp_login(driver):
+            driver.quit()
+            return [], set()
         time.sleep(8 if IS_WIN8_FAMILY else 5)
         if not find_group(driver, GROUP_NAME):
             print(f"[FAIL] Group {GROUP_NAME} not found")
+            print('[HINT] Confirm this group is visible in the logged-in WhatsApp account. '
+                  'Set group_name in sheet_config.json to its exact name, including any emoji.')
             driver.quit()
             return [], set()
         time.sleep(6 if IS_WIN8_FAMILY else 4)
