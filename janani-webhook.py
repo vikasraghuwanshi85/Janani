@@ -112,7 +112,9 @@ ALL_KEYS_PATTERN = r"(?:Date|Location|Vehicle\s*no|Present\s*odo|Previous\s*odo|
 FIELD_ALIASES = {
     "Date": ["Date"],
     "Location": ["Location", "Loc"],
-    "Vehicle no": ["Vehicle no", "Vehicle No", "Vehicle", "Vehicle No.", "Veh No", "Veh no", "V No"],
+    "Vehicle no": ["Vehicle No (Full)", "Vehicle No Full", "Vehicle Number", "Vehicle ID",
+                   "Vehicle no", "Vehicle No.", "Vehicle", "Veh No", "Veh.No", "V No",
+                   "Registration Number", "Registration No", "Reg No"],
     "Present odo": ["Present odo", "Present Odo", "Present ODO", "PRESENT ODO", "PRESENTODO", "Presentodo", "Present Odo Reading", "Present odo reading", "Present Reading", "Present Km", "Present KM"],
     "Previous odo": ["Previous odo", "Previous Odo", "Previous ODO", "PREVIOUS ODO", "PREVIOUSODO", "Previousodo", "Prev odo", "Prev Odo", "Prev ODO", "PREV ODO", "PREVODO", "Previous Reading", "Prev Reading"],
     "Diesel amount": ["Diesel amount", "Diseal amount", "Diesel Amount", "Diesel Amt", "Diseal Amt", "Diesel Amount", "Amount", "DieselAmount", "Diesel amt", "Diseal Amount", "Diesel Amount", "Diseal Aur Amount"],
@@ -261,6 +263,36 @@ def normalize_vehicle_raw(raw):
     cleaned = re.sub(r"[^A-Z0-9_]", "", cleaned)
     return cleaned
 
+def extract_vehicle_id(text):
+    """Use the actual message ID, preserving full registrations or four-digit IDs."""
+    # WhatsApp formatting and directional marks are not part of a registration.
+    text = re.sub(r"[*~_\u200e\u200f\u202a-\u202e\u2066-\u2069]", "", text)
+    labels = [re.escape(alias).replace(r"\ ", r"\s+")
+              for alias in sorted(FIELD_ALIASES["Vehicle no"], key=len, reverse=True)]
+    pattern = r"(?<!\w)(?:" + "|".join(labels) + r")(?!\w)[ \t]*[-:=]?[ \t]*"
+    matches = list(re.finditer(pattern, text, re.IGNORECASE))
+    candidates = set()
+    for match in matches:
+        value = text[match.end():].split("\n", 1)[0].strip()
+        # Also support a single-line report with fields lacking ':' or '-'.
+        next_field = re.search(r"(?<!\w)(?:" + "|".join(
+            re.escape(alias).replace(r"\ ", r"\s+")
+            for aliases in FIELD_ALIASES.values() for alias in aliases
+        ) + r")(?!\w)", value, re.IGNORECASE)
+        if next_field:
+            value = value[:next_field.start()].strip()
+        value = value.rstrip(",;.").strip()
+        normalized = re.sub(r"[ \t-]+", "", value).upper()
+        if re.fullmatch(r"\d{4}|[A-Z]{2}\d{1,2}[A-Z]{0,3}\d{1,4}", normalized):
+            candidates.add(normalized)
+    if matches:
+        return next(iter(candidates)) if len(candidates) == 1 else ""
+    # A full registration without a label is usable; an arbitrary number is not.
+    registrations = re.findall(r"(?<!\w)[A-Z]{2}[ -]*\d{1,2}[ -]*[A-Z]{1,3}[ -]*\d{1,4}(?!\w)", text, re.IGNORECASE)
+    candidates = {re.sub(r"[ -]+", "", item).upper() for item in registrations}
+    return next(iter(candidates)) if len(candidates) == 1 else ""
+
+
 def capitalize_name(name):
     if not name: return ""
     name = re.sub(r'^[^A-Za-z0-9]+', '', name)
@@ -330,18 +362,12 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
             return None, [str(exc) + ": bill skipped to avoid the wrong Drive folder"]
     date_folder, d, month_name = parse_date_strict_ddmmyyyy(date_str)
     
-    veh_raw = get_field("Vehicle no", text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text)
-    vehicle_raw = normalize_vehicle_raw(veh_raw)
-    if not vehicle_raw:
-        for pat in [r"Vehicle\s*no[^A-Z0-9]*([A-Z0-9]{3,10})", r"Vehicle\s*[:\-]\s*([A-Z0-9]{3,10})"]:
-            m = re.search(pat, (text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text), re.IGNORECASE)
-            if m:
-                vehicle_raw = normalize_vehicle_raw(m.group(1))
-                if vehicle_raw: break
-    if not vehicle_raw:
-        m = re.search(r"\b([A-Z]{2}\d{1,2}[A-Z]{0,3}\d{1,4})\b", (text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text).upper())
-        if m: vehicle_raw = normalize_vehicle_raw(m.group(1))
-    
+    vehicle_text = text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text
+    vehicle_raw = extract_vehicle_id(vehicle_text)
+    source_vehicle_id = vehicle_raw
+    if not vehicle_raw and not image_data:
+        return None, ["Missing, invalid or conflicting vehicle ID in WhatsApp message; report skipped"]
+
     if not vehicle_raw and image_data:
         text_hash = hashlib.md5(check_text.encode('utf-8', errors='ignore')).hexdigest()[:6].upper()
         m = re.search(r"\b(\d{4,10})\b", check_text)
@@ -358,7 +384,7 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
                 vehicle_raw = f"BILL_{txt_hash}"
         else: 
             if debug:
-                debug_info.append(f"Vehicle parse failed: veh_raw='{veh_raw}' normalized='{vehicle_raw}' len>{15 if vehicle_raw and len(vehicle_raw)>15 else 'empty'} for text: {check_text[:100]}")
+                debug_info.append(f"Vehicle parse failed: source normalized='{vehicle_raw}' len>{15 if vehicle_raw and len(vehicle_raw)>15 else 'empty'} for text: {check_text[:100]}")
             return None, debug_info
     
     tl = (text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text).lower()
@@ -443,6 +469,8 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
         "date": date_folder,
         "location": capitalize_name(get_field("Location", text)),
         "vehicle": vehicle_raw,
+        "vehicle_id": source_vehicle_id,
+        "vehicle_no": source_vehicle_id,
         "type": msg_type,
         "present_odo": present,
         "previous_odo": prev,

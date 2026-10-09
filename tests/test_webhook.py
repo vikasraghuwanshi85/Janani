@@ -139,6 +139,86 @@ class DedupTests(unittest.TestCase):
             self.assertEqual(len(list(Path(directory).iterdir())), 1)
 
 
+class VehicleIdTests(unittest.TestCase):
+    def test_actual_whatsapp_message_is_posted_with_7412(self):
+        message = ("Fuel msg-\n\nDate-8/10/26\nLocation-khargone DH\nVehicle no-7412\n"
+                   "Present odo-366754\nPrevious odo-366205\nDiseal amount-3441.45\n"
+                   "Diseal liter-35.05\nAverage-15.66\nPilot name-Raja\nPump Name- Aadeswar")
+        entry = app.parse_message(message)
+        self.assertEqual(entry['payload']['vehicle'], '7412')
+        self.assertEqual(entry['payload']['total_km'], '549')
+        main = next(node for node in ast.parse(SOURCE.read_text()).body
+                    if isinstance(node, ast.If) and isinstance(node.test, ast.Compare) and any(isinstance(value, ast.Constant) and value.value == '__main__' for value in node.test.comparators))
+        namespace = dict(app.__dict__, __name__='__main__', FORCE_PUSH=False,
+                         read_last_n_days=lambda **kwargs: ([entry], set()),
+                         acquire_push_lock=lambda: Mock(), save_history=Mock())
+        response = Mock(text='{"success":true}')
+        with patch.object(app.requests, 'post', return_value=response) as post, patch.object(app.time, 'sleep'), patch('builtins.print'):
+            exec(compile(ast.Module(body=[main], type_ignores=[]), str(SOURCE), 'exec'), namespace)
+        post.assert_called_once()
+        sent = post.call_args.kwargs['json']
+        for field in ['vehicle', 'vehicle_id', 'vehicle_no']:
+            self.assertEqual(sent[field], '7412')
+        self.assertEqual(sent['month'], 'Oct')
+        namespace['save_history'].assert_called_once()
+
+    def test_supported_labels_send_vehicle_to_webhook(self):
+        labels = ['Vehicle no', 'Vehicle No.', 'Vehicle No (Full)', 'Vehicle Number',
+                  'Vehicle ID', 'Veh No', 'Veh.No', 'V No', 'Registration No']
+        for label in labels:
+            with self.subTest(label=label):
+                message = fuel('361260', '360541').replace('Vehicle no - MP04AB1234', label + ' : 5998')
+                payload = app.parse_message(message)['payload']
+                self.assertEqual(payload['vehicle'], '5998')
+                self.assertEqual(payload['vehicle_id'], '5998')
+                self.assertEqual(payload['vehicle_no'], '5998')
+
+    def test_full_registration_and_whatsapp_formatting(self):
+        for text in ['Vehicle no - CG04NW7485', 'Vehicle No (Full): CG 04 NW 7485',
+                     '*Vehicle no* - *cg-04-nw-7485*', '‎Vehicle no : CG04NW7485‏']:
+            with self.subTest(text=text):
+                self.assertEqual(app.extract_vehicle_id(text), 'CG04NW7485')
+
+    def test_single_line_report_does_not_absorb_odometer(self):
+        message = ('Date - 08/10/26 Location - Barud Vehicle no - 5998 '
+                   'Present odo - 361260 Previous odo - 360541 Diesel amount - 4197.2 Diesel liter - 41.54')
+        p = app.parse_message(message)['payload']
+        self.assertEqual(p['vehicle'], '5998')
+        self.assertEqual(p['total_km'], '719')
+
+    def test_unseparated_single_line_vehicle_field(self):
+        self.assertEqual(app.extract_vehicle_id('Vehicle no 5998 Present odo 361260'), '5998')
+
+    def test_missing_id_is_not_guessed_from_location_or_odometer(self):
+        message = fuel('361260', '360541').replace('Vehicle no - MP04AB1234\n', '').replace('Date -', 'Location - Barud\nDate -')
+        result, warnings = app.parse_message_debug(message)
+        self.assertIsNone(result)
+        self.assertIn('vehicle ID', warnings[0])
+
+    def test_invalid_field_does_not_turn_into_a_vehicle(self):
+        for value in ['null', 'unknown', '599812', '5998 1234', '']:
+            with self.subTest(value=value):
+                self.assertIsNone(app.parse_message(fuel('361260', '360541').replace('MP04AB1234', value)))
+
+    def test_conflicting_vehicles_are_rejected(self):
+        self.assertEqual(app.extract_vehicle_id('Vehicle no - 5998\nVehicle ID - 6047'), '')
+
+    def test_bare_registration_supported_but_bare_numeric_id_not_guessed(self):
+        self.assertEqual(app.extract_vehicle_id('Report for CG04NW7485\nPresent odo - 360760'), 'CG04NW7485')
+        self.assertEqual(app.extract_vehicle_id('Location - Barud\nOdometer - 5998'), '')
+
+    def test_bill_placeholder_not_presented_as_source_vehicle(self):
+        payload = app.parse_message('[IMAGE_ONLY_BILL]', IMAGE, message_date='08/10/26')['payload']
+        self.assertEqual(payload['vehicle_id'], '')
+        self.assertEqual(payload['vehicle_no'], '')
+        self.assertTrue(payload['vehicle'].startswith('BILL_'))
+
+    def test_history_identity_keeps_different_vehicles_separate(self):
+        a = app.parse_message(fuel('361260', '360541').replace('MP04AB1234', '5998'))
+        b = app.parse_message(fuel('361260', '360541').replace('MP04AB1234', '6047'))
+        self.assertNotEqual(a['unique_key'], b['unique_key'])
+
+
 class WindowsCompatibilityTests(unittest.TestCase):
     def test_windows_versions(self):
         for major, minor, legacy, unsupported in [(5, 1, True, True), (6, 0, True, True),

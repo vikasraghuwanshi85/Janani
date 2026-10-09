@@ -31,7 +31,7 @@ run_windows.bat --days 2
 run_windows.bat --days 7 --debug-fuel
 ```
 
-`--days` selects the scan period; the default is two days. `--group "Your Group Name"` selects a different group. `--debug-fuel` prints parsing diagnostics. Settings in `sheet_config.json` for `days` and `group_name` take precedence over those command-line options.
+`--days` selects the scan period; the Python default is ten days; the daily launcher explicitly uses two days. `--group "Your Group Name"` selects a different group. `--debug-fuel` prints parsing diagnostics. Settings in `sheet_config.json` for `days` and `group_name` take precedence over those command-line options.
 
 `--force` allows previously recorded fuel/text entries to be sent again. It still respects bill-image history. Avoid using it for routine scheduled runs. `--all` requests a much longer scan and can take considerable time. Image bills currently bypass the parsed-date cutoff, so older bills encountered during scrolling may also be considered; their known push history still applies.
 
@@ -71,6 +71,24 @@ Use your actual deployment URL in place of the example. Do not overwrite an exis
 For offline or custom Chrome installations, add `chrome_binary` and `chromedriver_path` to this configuration, or set `JANANI_CHROME_BINARY` and `JANANI_CHROMEDRIVER` in the process environment. Environment settings take precedence for browser paths. ChromeDriver must match Chrome's major version. Modern systems without an explicitly supplied driver use Selenium Manager. See [WINDOWS.md](WINDOWS.md) for path examples and legacy-system limitations.
 
 Configuration, history, the sync lock, and the WhatsApp profile resolve beside the Python file, even when launched from another working directory.
+
+## Vehicle IDs from WhatsApp
+
+Vehicle IDs come from the WhatsApp report itself, not from a location-to-vehicle mapping. Supported labels include `Vehicle no`, `Vehicle No.`, `Vehicle No (Full)`, `Vehicle Number`, `Vehicle ID`, `Veh No`, and `Registration No`. For example:
+
+```text
+Date - 08/10/2026
+Location - Barud
+Vehicle no - 5998
+Present odo - 361260
+Previous odo - 360541
+Diesel amount - 4197.2
+Diesel liter - 41.54
+```
+
+This message sends `vehicle`, `vehicle_id`, and `vehicle_no` as `5998` in the webhook JSON. A full registration such as `CG 04 NW 7485` is sent as `CG04NW7485`; a four-digit ID is preserved without inventing a registration prefix. Fuel/text reports with missing, invalid, or conflicting vehicle IDs are skipped with a warning. An image-only bill can retain a synthetic bill reference in `vehicle` for compatibility; its source vehicle ID fields remain blank when the image caption has no vehicle ID.
+
+The Apps Script backups in this repository read `data.vehicle`. Ensure the currently deployed Apps Script writes that value to October's **Vehicle No (Full)** column (or explicitly reads the matching `vehicle_id`/`vehicle_no` field). Renaming a sheet column does not by itself change a JSON key. Existing blank October rows are not automatically filled or replayed by this parsing fix; do not use `--force` to backfill them indiscriminately because that can create additional fuel duplicates.
 
 ## Bill and odometer safeguards
 
