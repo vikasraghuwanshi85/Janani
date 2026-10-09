@@ -88,7 +88,7 @@ Diesel liter - 41.54
 
 This message sends `vehicle`, `vehicle_id`, and `vehicle_no` as `5998` in the webhook JSON. A full registration such as `CG 04 NW 7485` is sent as `CG04NW7485`; a four-digit ID is preserved without inventing a registration prefix. Fuel/text reports with missing, invalid, or conflicting vehicle IDs are skipped with a warning. An image-only bill can retain a synthetic bill reference in `vehicle` for compatibility; its source vehicle ID fields remain blank when the image caption has no vehicle ID.
 
-The Apps Script backups in this repository read `data.vehicle`. Ensure the currently deployed Apps Script writes that value to October's **Vehicle No (Full)** column (or explicitly reads the matching `vehicle_id`/`vehicle_no` field). Renaming a sheet column does not by itself change a JSON key. Existing blank October rows are not automatically filled or replayed by this parsing fix; do not use `--force` to backfill them indiscriminately because that can create additional fuel duplicates.
+The supplied V79 Apps Script only maps a header called `Vehicle`, while October uses **Vehicle No (Full)**. This makes the October cell blank even when Python sends `vehicle`. Apply the [Apps Script fuel-column fix](apps_script/README.md) to the deployed project; it supports both headers, writes timestamps, and finds duplicate-check columns by name. Renaming a sheet column does not by itself change a JSON key. Existing blank October rows are not automatically filled or replayed by this fix; do not use `--force` to backfill them indiscriminately because that can create additional fuel duplicates.
 
 ## Bill and odometer safeguards
 
