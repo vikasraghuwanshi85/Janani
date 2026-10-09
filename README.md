@@ -37,7 +37,13 @@ run_windows.bat --days 7 --debug-fuel
 
 ## Run daily with Windows Task Scheduler
 
-`run_daily.bat` runs the complete Python workflow: WhatsApp collection followed by webhook requests for the selected reports. It scans two days by default, appends output to `daily_log.txt`, and returns Python's exit code. The two-day scan provides overlap between daily runs; history and duplicate checks prevent acknowledged entries from being sent again.
+`run_daily.bat` automatically sets up its own Python 3.12, packages, Chrome for Testing, and matching ChromeDriver on **Windows 10/11**, then runs WhatsApp collection and webhook uploads. You do not need to install Python, Chrome, or run `setup_windows.bat` first for this launcher. Copy the **complete project**, including `scripts/bootstrap_windows.ps1` and `requirements.txt`; the BAT alone is insufficient. PowerShell supplied with Windows performs the setup without administrator rights.
+
+The first run downloads several hundred MB over HTTPS and may take several minutes. Internet/proxy access must allow python.org, bootstrap.pypa.io, pypi.org, files.pythonhosted.org, googlechromelabs.github.io, and storage.googleapis.com. Later runs reuse `.janani-runtime/current`; no driver-list download by Selenium Manager is needed. Setup failures stop the sync, are logged, and return exit code 2. Keep the project in a writable local folder. Organization policies may block downloads, PowerShell scripts, or downloaded executables.
+
+The runtime is local to the computer where it was set up. When moving the project to another computer, omit `.janani-runtime`, `.venv`, and `whatsapp_session_janani`; let setup recreate the runtime and log in again. Preserve or transfer push history appropriately for the same workflow to avoid historical replays. Browser updates are not downloaded every day: to refresh the portable runtime, close its Chrome, rename `.janani-runtime/current` to an archive name, and run the launcher again. Keep the saved runtime until the replacement works. Existing `setup_windows.bat` / `run_windows.bat` remain available for the separately installed Python workflow.
+
+The daily scan covers two days by default, appends output to `daily_log.txt`, and returns the sync's exit code. The two-day overlap and duplicate checks prevent acknowledged entries from being sent again. Explicit runtime browser/driver paths take precedence over `sheet_config.json` browser settings when using this launcher; group and webhook settings still apply. Windows 7/8/8.1 and XP/Vista cannot use this current browser/runtime; this is not an offline or universally compatible BAT file.
 
 Run `run_daily.bat` manually once before scheduling, complete the QR login if needed, and check the log. Then open **Task Scheduler → Create Task**:
 
@@ -130,3 +136,11 @@ Do not delete push history, remove browser profile locks, or use `--force` as a 
 ```
 
 The regression suite covers parsing, bill deduplication, date-folder payloads, atomic history, locking, and mocked Windows browser selection. Native Windows scheduling and live WhatsApp/Google uploads have not been validated in the Linux development environment.
+
+The portable runtime's setup flow has a PowerShell smoke test using fake downloads and Linux executables:
+
+```text
+pwsh -NoProfile -File tests/test_bootstrap_windows.ps1
+```
+
+It checks PowerShell parsing, first-time setup, cached reuse, embedded module paths, and failed-download handling. It does not execute Windows binaries or validate the BAT on Windows. The official Python and paired Windows browser/driver download URLs were also checked for availability.

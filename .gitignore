@@ -3,6 +3,7 @@ pushed_history.json
 daily_log.txt
 # Local Python environment and runtime artifacts
 .venv/
+.janani-runtime/
 __pycache__/
 *.pyc
 pushed_history.json.lock
