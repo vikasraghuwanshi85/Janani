@@ -1,4 +1,8 @@
 whatsapp_session_janani
 pushed_history.json
-run_daily.bat
 daily_log.txt
+# Local Python environment and runtime artifacts
+.venv/
+__pycache__/
+*.pyc
+pushed_history.json.lock
