@@ -1,0 +1,271 @@
+/**
+ * JANANI FLEET - FINAL V62 - USER WANTS 23/09/26 AS TEXT
+ * Fix: Store as DD/MM/YY as text, not DD-MM-YYYY
+ * Previous: 23-09-2026 as text
+ * Now: 23/09/26 as text (with leading ' to force text)
+ */
+
+var SHEET_ID = "1ii9MU_bScuYAqtuXGQyKd4QLsgHcwwJJLcfusoo5NWI";
+var BILL_IMAGES_FOLDER_ID = "1fGcvEMxynl9MNsADvpqFQEf1elDbrFgH";
+
+function jsonResponse(obj){
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// V62: Returns DD/MM/YY as text - USER REQUEST
+function parseDate(dateStr){
+  try{
+    var original = String(dateStr || "").trim();
+    if(!original) throw "empty";
+    var parts = original.split(/[\/\-]/);
+    if(parts.length == 3){
+      var d = parseInt(parts[0],10), m = parseInt(parts[1],10), y = parseInt(parts[2],10);
+      if(isNaN(d) || isNaN(m) || isNaN(y)) throw "NaN";
+      if(y < 100) y += 2000;
+      if(m >= 1 && m <= 12 && d >= 1 && d <= 31){
+        var dd = ("0" + d).slice(-2);
+        var mm = ("0" + m).slice(-2);
+        var yy = ("0" + (y % 100)).slice(-2); // Last 2 digits: 2026 -> 26
+        var yyyy = y;
+        // USER WANTS: 23/09/26 as text
+        var folder = dd + "/" + mm + "/" + yy; // DD/MM/YY
+        var folderFull = dd + "-" + mm + "-" + yyyy; // Keep full for reference
+        var months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+        return {
+          folder: folder, // 23/09/26 as text - USER WANTS THIS
+          folderFull: folderFull, // 23-09-2026
+          monthName: months[m-1], 
+          year: y, 
+          original: original, 
+          v: "V62 DD/MM/YY"
+        };
+      }
+    }
+    throw "Invalid";
+  }catch(e){
+    var now = new Date();
+    var months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    var dd = ("0" + now.getDate()).slice(-2);
+    var mm = ("0" + (now.getMonth()+1)).slice(-2);
+    var yy = ("0" + (now.getFullYear() % 100)).slice(-2);
+    return {
+      folder: dd + "/" + mm + "/" + yy,
+      folderFull: dd + "-" + mm + "-" + now.getFullYear(),
+      monthName: months[now.getMonth()], 
+      year: now.getFullYear(), 
+      original: dateStr, 
+      v: "V62 fallback"
+    };
+  }
+}
+
+function cleanSpecialChars_(str){
+  if(!str) return "";
+  return String(str).trim().replace(/^[^A-Za-z0-9]+/, '').replace(/^[\/\\\-:;.,]+/, '').trim();
+}
+
+function doPost(e){
+  try{
+    var data = {};
+    if(e.postData && e.postData.contents){
+      try{ data = JSON.parse(e.postData.contents); }catch(err){ data = e.parameter || {}; }
+    }else{ data = e.parameter || {}; }
+    
+    if(data.action == "test_date"){
+      var parsed = parseDate(data.date || "23/09/26");
+      return jsonResponse({
+        v:"V62 - USER WANTS DD/MM/YY",
+        input: data.date, 
+        folder: parsed.folder,
+        expected: "23/09/26",
+        isCorrect: parsed.folder == "23/09/26",
+        folderFull: parsed.folderFull,
+        parsed: parsed
+      });
+    }
+    if(data.action == "fix_dates"){
+      return fixExistingDates_();
+    }
+
+    var parsedForMonth = parseDate(data.date);
+    var month = data.month || parsedForMonth.monthName || "Unknown";
+    var MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec","Unknown"];
+    if(MONTHS.indexOf(month) === -1) month = "Unknown";
+
+    var ss = SpreadsheetApp.openById(SHEET_ID);
+    var sheet = ss.getSheetByName(month);
+    if(!sheet){
+      sheet = ss.insertSheet(month);
+      sheet.appendRow(["Date", "Location", "Vehicle", "Type", "Present ODO", "Previous ODO", "Total KM", "Diesel Amount", "Diesel Liter", "Rate/L", "Average", "Bill Amount", "Work Details", "Pilot", "Pump", "Source", "Image URL", "Timestamp"]);
+      sheet.getRange("A:A").setNumberFormat("@");
+      sheet.getRange(1,1,1,18).setFontWeight("bold").setBackground("#4285f4").setFontColor("white");
+      sheet.setFrozenRows(1);
+    }else{
+      try{ sheet.getRange("A:A").setNumberFormat("@"); }catch(e){}
+    }
+
+    var vehicle = String(data.vehicle || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    var parsedDateForStorage = parseDate(data.date);
+    var date = parsedDateForStorage ? parsedDateForStorage.folder : String(data.date || "").trim();
+    // V62: date is already DD/MM/YY like 23/09/26
+
+    // Force TEXT with leading apostrophe: '23/09/26
+    var dateForSheet = "'" + date;
+
+    var presentOdo = String(data.present_odo || "").trim().replace(/\D/g, '').substring(0,7);
+    var previousOdo = String(data.previous_odo || "").trim().replace(/\D/g, '').substring(0,7);
+    var type = String(data.type || "FUEL").trim().toUpperCase();
+    type = type.indexOf("MAINT") >=0 ? "MAINTENANCE" : "FUEL";
+
+    // Duplicate check
+    var allData = sheet.getDataRange().getValues();
+    for(var i=1; i<allData.length; i++){
+      var rDate = String(allData[i][0]||"").trim().replace(/^'/, '');
+      var rVehicle = String(allData[i][2]||"").trim().toUpperCase();
+      if(rDate == date && rVehicle == vehicle){
+        var rPresent = String(allData[i][4]||"").trim();
+        if(rPresent == presentOdo){
+          return jsonResponse({success:true, status:"duplicate", month: month, duplicate:true, dateStored: date});
+        }
+      }
+    }
+
+    sheet.appendRow([
+      dateForSheet, // '23/09/26 as text
+      cleanSpecialChars_(String(data.location||"").trim()),
+      vehicle,
+      type,
+      presentOdo,
+      previousOdo,
+      String(data.total_km||"").trim(),
+      String(data.diesel_amount||"").trim(),
+      String(data.diesel_liter||"").trim(),
+      String(data.rate||"").trim(),
+      String(data.average||"").trim(),
+      String(data.bill_amount||"").trim(),
+      cleanSpecialChars_(String(data.work_details||"").trim()),
+      String(data.pilot||"").trim(),
+      String(data.pump||"").trim(),
+      String(data.source||"").trim(),
+      String(data.image_url||"").trim(),
+      new Date()
+    ]);
+
+    var lastRow = sheet.getLastRow();
+    try{
+      sheet.getRange(lastRow, 1).setNumberFormat("@");
+    }catch(e){}
+
+    return jsonResponse({success:true, status:"inserted", month: month, duplicate:false, dateStored: date, dateForSheet: dateForSheet, v: "V62 DD/MM/YY"});
+  }catch(err){
+    return jsonResponse({success:false, status:"error", error: String(err)});
+  }
+}
+
+function fixExistingDates_(){
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  var fixed = 0;
+  MONTHS.forEach(function(m){
+    var sh = ss.getSheetByName(m);
+    if(!sh || sh.getLastRow() <= 1) return;
+    sh.getRange("A:A").setNumberFormat("@");
+    var data = sh.getDataRange().getValues();
+    for(var i=1; i<data.length; i++){
+      var val = data[i][0];
+      var newVal = null;
+      if(val instanceof Date){
+        var d = val.getDate(), mo = val.getMonth()+1, y = val.getFullYear();
+        if(val.getUTCHours() == 18 || val.getUTCHours() == 19){
+          var corrected = new Date(val.getTime() + 24*60*60*1000);
+          d = corrected.getDate(); mo = corrected.getMonth()+1; y = corrected.getFullYear();
+        }
+        var dd = ("0" + d).slice(-2), mm = ("0" + mo).slice(-2), yy = ("0" + (y % 100)).slice(-2);
+        newVal = dd + "/" + mm + "/" + yy;
+      }else{
+        var str = String(val).trim().replace(/^'/, '');
+        if(str.indexOf("-") > 0){
+          // Convert 23-09-2026 -> 23/09/26
+          var parts = str.split("-");
+          if(parts.length == 3){
+            var dd = ("0" + parseInt(parts[0],10)).slice(-2);
+            var mm = ("0" + parseInt(parts[1],10)).slice(-2);
+            var yy = parts[2].slice(-2);
+            newVal = dd + "/" + mm + "/" + yy;
+          }
+        }else if(str.indexOf("T") > 0 && str.indexOf("Z") > 0){
+          try{
+            var dt = new Date(str);
+            var d = dt.getDate(), mo = dt.getMonth()+1, y = dt.getFullYear();
+            if(dt.getUTCHours() == 18 || dt.getUTCHours() == 19){
+              var corrected = new Date(dt.getTime() + 24*60*60*1000);
+              d = corrected.getDate(); mo = corrected.getMonth()+1; y = corrected.getFullYear();
+            }
+            var dd = ("0" + d).slice(-2), mm = ("0" + mo).slice(-2), yy = ("0" + (y % 100)).slice(-2);
+            newVal = dd + "/" + mm + "/" + yy;
+          }catch(e){}
+        }
+      }
+      if(newVal){
+        sh.getRange(i+1, 1).setNumberFormat("@");
+        sh.getRange(i+1, 1).setValue("'" + newVal);
+        fixed++;
+      }
+    }
+  });
+  return jsonResponse({success:true, message: "Fixed " + fixed + " dates to DD/MM/YY", fixed: fixed, v: "V62 fix"});
+}
+
+function doGet(e){
+  try{
+    var params = e.parameter || {};
+    var action = String(params.action || "").trim().toLowerCase();
+    
+    if(action == "test_date"){
+      var dateInput = params.date || "23/09/26";
+      try{ dateInput = decodeURIComponent(dateInput); }catch(err){}
+      var parsed = parseDate(dateInput);
+      return jsonResponse({
+        v: "V62 - DD/MM/YY AS TEXT",
+        input: dateInput,
+        folder: parsed.folder,
+        expected: "23/09/26",
+        isCorrect: parsed.folder == "23/09/26",
+        message: "Now stores as 23/09/26 as text, not 23-09-2026",
+        allParams: params
+      });
+    }
+    
+    if(action == "fix_dates"){
+      return fixExistingDates_();
+    }
+    
+    if(action == "get_dashboard"){
+      var ss = SpreadsheetApp.openById(SHEET_ID);
+      var MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+      var allData = [];
+      MONTHS.forEach(function(m){
+        var sh = ss.getSheetByName(m);
+        if(!sh || sh.getLastRow() <= 1) return;
+        var data = sh.getDataRange().getValues();
+        var headers = data[0];
+        for(var i=1; i<data.length; i++){
+          var obj = {};
+          for(var c=0; c<headers.length && c<data[i].length; c++){
+            var val = data[i][c];
+            if(typeof val == "string") val = val.replace(/^'/, '');
+            obj[headers[c]] = val;
+          }
+          obj["_sheet"] = m;
+          allData.push(obj);
+        }
+      });
+      return jsonResponse({success:true, v:"V62 DD/MM/YY", data: allData, count: allData.length});
+    }
+    
+    return jsonResponse({v:"V62 DD/MM/YY AS TEXT", message:"Use ?action=test_date&date=23/09/26 -> should return 23/09/26", dateTest: parseDate("23/09/26")});
+    
+  }catch(err){
+    return jsonResponse({success:false, error: String(err), v:"V62 error"});
+  }
+}

@@ -1,0 +1,730 @@
+
+import os, re, time, requests, base64, json, hashlib, sys
+from datetime import datetime, timedelta
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+
+GROUP_NAME = "Janani Reporting"
+CHAT_DB_PATH = "whatsapp_session_janani"
+# Default from your sheet_config.json - will be overridden if file exists
+WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbx-h8zs4Jz6DbNUHzq2OO1bjLktbf-z0ZR4YODfuaC7V4sjT2kF6c-DSMSmXOQVB-u9/exec"
+
+# Support --webhook argument
+for i, arg in enumerate(sys.argv):
+    if arg.startswith("--webhook="):
+        WEBHOOK_URL = arg.split("=", 1)[1]
+        print(f"Using webhook from arg: {WEBHOOK_URL}")
+    elif arg == "--webhook" and i+1 < len(sys.argv):
+        WEBHOOK_URL = sys.argv[i+1]
+        print(f"Using webhook from arg: {WEBHOOK_URL}")
+
+# Also read from sheet_config.json (your new deployment)
+CONFIG_FILE = "sheet_config.json"
+if os.path.exists(CONFIG_FILE):
+    try:
+        with open(CONFIG_FILE, "r") as cf:
+            cfg = json.load(cf)
+            if "webhook_url" in cfg and cfg["webhook_url"]:
+                WEBHOOK_URL = cfg["webhook_url"]
+                print(f"Using webhook from {CONFIG_FILE}: {WEBHOOK_URL}")
+    except Exception as e:
+        print(f"Config error: {e}")
+
+HISTORY_FILE = "pushed_history.json"
+BILL_HISTORY_FILE = "bill_history.json"
+MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+
+FORCE_MODE = "--force" in sys.argv or "-f" in sys.argv
+GET_ALL = "--all" in sys.argv
+DEBUG_MODE = "--debug" in sys.argv
+NO_TIME_FILTER = "--no-time-filter" in sys.argv or GET_ALL
+# Parse --days argument - your version was 5 days, now support --all = 9999
+SCAN_DAYS = 5
+if GET_ALL or NO_TIME_FILTER:
+    SCAN_DAYS = 9999
+for arg in sys.argv:
+    if arg.startswith("--days"):
+        try:
+            if "=" in arg:
+                SCAN_DAYS = int(arg.split("=")[1])
+            else:
+                idx = sys.argv.index(arg)
+                SCAN_DAYS = int(sys.argv[idx+1])
+        except:
+            pass
+
+TARGET_SUBSTRINGS = ["Vehicle no-", "Present odo-", "Pilot name", "Previous odo"]
+
+def is_target_message(text, debug=False):
+    if not text:
+        return False
+    text_lower = text.lower()
+    if "date-" not in text_lower:
+        return False
+    
+    # YOUR FIX: Ignore empty value messages like Date- Location- with no values
+    has_valid_value = False
+    patterns = [
+        r'Date-\s*[0-9/\-]+',
+        r'Vehicle no-\s*[A-Z0-9]+',
+        r'Present odo-\s*\d+',
+        r'Location-\s*\S+',
+        r'Pilot name-\s*\S+',
+        r'Bill amount-\s*[\d.]+',
+        r'Work details-\s*\S+',
+    ]
+    for pat in patterns:
+        if re.search(pat, text, re.I):
+            has_valid_value = True
+            break
+    if not has_valid_value:
+        if debug:
+            print(f"    Ignoring empty value message: {text[:100]}")
+        return False
+    
+    for substr in TARGET_SUBSTRINGS:
+        if substr.lower() in text_lower:
+            field_pattern = rf"{re.escape(substr)}\s*\S+"
+            if re.search(field_pattern, text, re.I):
+                return True
+            for line in text.split('\n'):
+                if substr.lower() in line.lower():
+                    parts = line.split('-', 1)
+                    if len(parts) > 1 and parts[1].strip():
+                        return True
+    # Extra lenient
+    if "vehicle" in text_lower and "no" in text_lower:
+        if re.search(r'Vehicle no-\s*[A-Z0-9]+', text, re.I):
+            return True
+    if "pilot" in text_lower and "name" in text_lower:
+        if re.search(r'Pilot name-\s*\S+', text, re.I):
+            return True
+    if "present" in text_lower and "odo" in text_lower:
+        if re.search(r'Present odo-\s*\d+', text, re.I):
+            return True
+    # Fuel/Mntc indicators
+    if "fuel msg" in text_lower or "mntc msg" in text_lower or "mtc msg" in text_lower:
+        return True
+    return False
+
+def get_message_type(text):
+    text_lower = text.lower()
+    if "fuel msg-" in text_lower or "diesel" in text_lower or "diseal" in text_lower:
+        return "FUEL"
+    if "mtc msg-" in text_lower or "mntc msg-" in text_lower or "work details" in text_lower:
+        return "MAINTENANCE"
+    return "UNKNOWN"
+
+def get_field(key, text):
+    m = re.search(rf"{key}\s*-\s*([^\n\r]+)", text, re.IGNORECASE)
+    if not m:
+        return ""
+    val = m.group(1).strip()
+    if not val or val == "-" or val.lower() == "null":
+        return ""
+    return val
+
+def normalize_vehicle_raw(raw):
+    if not raw:
+        return ""
+    return re.sub(r"[\s\-]+", "", raw.strip().upper())
+
+def parse_date_strict_ddmmyyyy(date_str):
+    date_str = date_str.strip()
+    normalized = re.sub(r'[\-]', '/', date_str)
+    for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+        try:
+            d = datetime.strptime(normalized, fmt)
+            if d.year < 100:
+                d = d.replace(year=2000 + d.year)
+            month_name = MONTHS[d.month-1]
+            return d.strftime("%d-%m-%Y"), d, month_name
+        except:
+            continue
+    try:
+        parts = re.split(r'[/\-]', date_str.strip())
+        if len(parts) == 3:
+            day = int(parts[0])
+            mon = int(parts[1])
+            yr = int(parts[2])
+            if yr < 100:
+                yr += 2000
+            if 1 <= mon <= 12 and 1 <= day <= 31:
+                d = datetime(yr, mon, day)
+                month_name = MONTHS[mon-1]
+                return d.strftime("%d-%m-%Y"), d, month_name
+    except:
+        pass
+    now = datetime.now()
+    return now.strftime("%d-%m-%Y"), now, MONTHS[now.month-1]
+
+def parse_message(text):
+    if not is_target_message(text):
+        return None
+    lines = text.strip().split('\n')
+    non_empty_fields = 0
+    for line in lines:
+        line = line.strip()
+        if '-' in line:
+            parts = line.split('-', 1)
+            if len(parts) > 1 and parts[1].strip():
+                non_empty_fields += 1
+    if non_empty_fields < 2:
+        return None
+    msg_type = get_message_type(text)
+    date_str = get_field("Date", text)
+    if not date_str:
+        m = re.search(r"Date-\s*([0-9/\-]+)", text, re.I)
+        if m:
+            date_str = m.group(1)
+    if not date_str:
+        return None
+    if not re.search(r'[0-9]', date_str):
+        return None
+    date_folder, d, month_name = parse_date_strict_ddmmyyyy(date_str)
+    present = re.sub(r"\D", "", get_field("Present odo", text))
+    prev = re.sub(r"\D", "", get_field("Previous odo", text))
+    total_km = ""
+    try:
+        if present and prev:
+            total_km = str(int(present) - int(prev))
+    except:
+        pass
+    veh_raw = get_field("Vehicle no", text)
+    if not veh_raw:
+        m = re.search(r"Vehicle no-\s*([A-Z0-9]+)", text, re.I)
+        if m:
+            veh_raw = m.group(1)
+    vehicle_raw = normalize_vehicle_raw(veh_raw)
+    if not vehicle_raw:
+        return None
+    payload = {
+        "date": date_str,
+        "location": get_field("Location", text),
+        "vehicle": vehicle_raw,
+        "type": "FUEL" if msg_type=="FUEL" else "MAINTENANCE",
+        "present_odo": present,
+        "previous_odo": prev,
+        "total_km": total_km,
+        "diesel_amount": re.sub(r"[^\d.]", "", get_field("Diesel amount", text) or get_field("Diseal amount", text)),
+        "diesel_liter": re.sub(r"[^\d.]", "", get_field("Diesel liter", text) or get_field("Diseal liter", text)),
+        "average": get_field("Average", text),
+        "bill_amount": re.sub(r"[^\d.]", "", get_field("Bill amount", text)),
+        "work_details": get_field("Work details", text),
+        "pilot": get_field("Pilot name", text),
+        "pump": get_field("Pump Name", text),
+        "source": "Janani Reporting",
+        "month": month_name
+    }
+    unique_key = f"{date_str.strip()}_{vehicle_raw}_{present}_{prev}".lower()
+    return {
+        "month": month_name,
+        "date_raw": date_str,
+        "date_folder": date_folder,
+        "unique_key": unique_key,
+        "present": present,
+        "payload": payload,
+        "whatsapp_time": None
+    }
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, 'r') as f:
+                return set(json.load(f))
+        except:
+            return set()
+    return set()
+
+def save_history(s):
+    with open(HISTORY_FILE, 'w') as f:
+        json.dump(list(s), f, indent=2)
+
+def load_bill_history():
+    if os.path.exists(BILL_HISTORY_FILE):
+        try:
+            with open(BILL_HISTORY_FILE, 'r') as f:
+                data = json.load(f)
+                return set(data.get("hashes", [])), set(data.get("files", []))
+        except:
+            return set(), set()
+    return set(), set()
+
+def save_bill_history(hashes, files):
+    with open(BILL_HISTORY_FILE, 'w') as f:
+        json.dump({"hashes": list(hashes), "files": list(files)}, f, indent=2)
+
+def push_to_sheet(payload, history_set, unique_key):
+    # FIXED V35: Your version had bug - used undefined variables vehicle, month, response, history
+    if not FORCE_MODE and unique_key in history_set:
+        print(f"  ⏭ SKIPPED (already pushed): {payload['vehicle']} | {payload['date']} → {payload['month']}")
+        return True
+    print(f"  → Pushing: [{payload['type']}] {payload['vehicle']} | {payload['date']} → {payload['month']} | {payload['location']}")
+    for attempt in range(3):
+        try:
+            payload["skipAllLogs"] = True
+            payload["action"] = "add_entry"
+            r = requests.post(WEBHOOK_URL, json=payload, timeout=90)
+            if "<!DOCTYPE html>" in r.text and "ppConfig" in r.text:
+                print(f"  ❌ 404 HTML - Deployment deleted! Check WEBHOOK_URL")
+                print(f"  URL: {WEBHOOK_URL}")
+                return False
+            if r.status_code == 404:
+                print(f"  ❌ 404 - Webhook not found")
+                return False
+            if r.status_code == 200:
+                resp_text = r.text or ""
+                try:
+                    resp = r.json() if resp_text and not resp_text.strip().startswith("<") else {}
+                except:
+                    resp = {}
+                is_success = False
+                if resp.get("success") == True or resp.get("status") in ["success", "ok"]:
+                    is_success = True
+                if '"success":true' in resp_text or '"status":"success"' in resp_text:
+                    is_success = True
+                if r.status_code == 200 and resp_text and not resp_text.strip().startswith("<") and len(resp_text) < 1000:
+                    # For older scripts that return plain text
+                    if "success" in resp_text.lower() or "added" in resp_text.lower():
+                        is_success = True
+                    elif resp_text.strip() == "" or "ok" in resp_text.lower():
+                        is_success = True
+                month = resp.get("month", payload.get("month", "Unknown"))
+                if is_success:
+                    print(f"  ✅ SHEET: {payload.get('vehicle')} -> {month} | {payload.get('type')} | {resp_text[:150]}")
+                    history_set.add(unique_key)
+                    save_history(history_set)
+                    return True
+                if "duplicate" in resp_text.lower():
+                    print(f"  ⏭ DUPLICATE: {payload.get('vehicle')} {payload.get('date')}")
+                    history_set.add(unique_key)
+                    save_history(history_set)
+                    return True
+                print(f"  ❌ FAILED: {r.status_code} - {resp_text[:300]}")
+                if attempt < 2:
+                    time.sleep(2)
+                    continue
+                return False
+            else:
+                print(f"  ❌ HTTP {r.status_code}: {r.text[:300]}")
+                if attempt < 2:
+                    time.sleep(2)
+                    continue
+                return False
+        except Exception as e:
+            print(f"  ❌ Error attempt {attempt+1}: {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(2)
+            continue
+    return False
+
+def is_bill_like_image(img_element):
+    try:
+        src = img_element.get_attribute("src") or ""
+        data_src = img_element.get_attribute("data-src") or ""
+        if not src and not data_src:
+            src = img_element.get_attribute("data-lazy-src") or img_element.get_attribute("href") or ""
+            if not src:
+                return False
+        is_blob = src.startswith("blob:") or "blob:" in src or data_src.startswith("blob:")
+        is_data = src.startswith("data:image") or data_src.startswith("data:image")
+        is_http = src.startswith("http")
+        try:
+            size = img_element.size
+            w = size.get("width", 0)
+            h = size.get("height", 0)
+            if w < 60 or h < 60:
+                if not (is_blob or is_data):
+                    return False
+        except:
+            w = h = 0
+        if is_blob or is_data or is_http:
+            if w > 80 or h > 80 or is_blob or is_data:
+                return True
+        try:
+            if w > 100 and h > 100:
+                return True
+        except:
+            pass
+        return True
+    except:
+        return False
+
+def upload_bill_to_drive(date_folder, file_path, vehicle, original_date, present_odo, bill_hashes, bill_files):
+    try:
+        if not os.path.exists(file_path):
+            return False
+        with open(file_path, 'rb') as f:
+            content_data = f.read()
+        file_hash = hashlib.md5(content_data).hexdigest()
+        if file_hash in bill_hashes:
+            print(f"  ⏩ Bill already uploaded (hash)")
+            try:
+                os.remove(file_path)
+            except:
+                pass
+            return True
+        ext = os.path.splitext(file_path)[1] or ".jpg"
+        filename = f"{vehicle}_{date_folder}_{present_odo}_{file_hash[:8]}{ext}" if present_odo else f"{vehicle}_{date_folder}_{file_hash[:8]}{ext}"
+        if filename in bill_files:
+            print(f"  ⏩ Bill already uploaded (filename)")
+            try:
+                os.remove(file_path)
+            except:
+                pass
+            return True
+        b64_data = base64.b64encode(content_data).decode('utf-8')
+        payload = {
+            "action": "upload_bill",
+            "date_folder": date_folder,
+            "filename": filename,
+            "mimeType": "image/jpeg",
+            "filedata": b64_data,
+            "vehicle": vehicle,
+            "original_date": original_date
+        }
+        print(f"  → Uploading BILL: {filename} → {date_folder}")
+        r = requests.post(WEBHOOK_URL, data=payload, timeout=60)
+        print(f"  ✅ DRIVE: {filename} - {r.status_code}")
+        bill_hashes.add(file_hash)
+        bill_files.add(filename)
+        save_bill_history(bill_hashes, bill_files)
+        try:
+            os.remove(file_path)
+        except:
+            pass
+        return True
+    except Exception as e:
+        print(f"  ❌ Drive error: {e}")
+        return False
+
+def download_blob_image(driver, blob_url, save_path):
+    try:
+        if blob_url.startswith('data:'):
+            try:
+                if ',' in blob_url:
+                    header, b64data = blob_url.split(',', 1)
+                    with open(save_path, "wb") as f:
+                        f.write(base64.b64decode(b64data))
+                    print(f"  Saved data:image directly ({len(b64data)} chars)")
+                    return True
+            except Exception as e:
+                print(f"  data: URL parse error: {e}")
+                return False
+        js_code = """
+        const blobUrl = arguments[0];
+        const callback = arguments[1];
+        if (blobUrl.startsWith('data:')) {
+            callback(blobUrl);
+            return;
+        }
+        fetch(blobUrl).then(r => r.blob()).then(blob => {
+            const reader = new FileReader();
+            reader.onloadend = () => callback(reader.result);
+            reader.readAsDataURL(blob);
+        }).catch(err => {
+            callback('ERROR:'+err + ' URL:' + blobUrl);
+        });
+        """
+        result = driver.execute_async_script(js_code, blob_url)
+        if result and result.startswith("data:"):
+            try:
+                header, b64data = result.split(',', 1)
+                with open(save_path, "wb") as f:
+                    f.write(base64.b64decode(b64data))
+                print(f"  Downloaded blob: {blob_url[:60]}... -> {len(b64data)} chars")
+                return True
+            except Exception as e:
+                print(f"  Blob decode error: {e}")
+                return False
+        if blob_url.startswith('http'):
+            try:
+                r = requests.get(blob_url, timeout=10)
+                if r.status_code == 200:
+                    with open(save_path, "wb") as f:
+                        f.write(r.content)
+                    print(f"  Downloaded http image: {blob_url[:60]}")
+                    return True
+            except:
+                pass
+        print(f"  Failed to download image: {blob_url[:80]}... Result: {str(result)[:100] if result else 'None'}")
+        return False
+    except Exception as e:
+        print(f"  download_blob_image error: {e} for URL: {blob_url[:60]}")
+        return False
+
+def parse_whatsapp_timestamp(bubble_element):
+    try:
+        pre_plain = bubble_element.get_attribute("data-pre-plain-text") or ""
+        if not pre_plain:
+            try:
+                parent = bubble_element.find_element(By.XPATH, "./..")
+                pre_plain = parent.get_attribute("data-pre-plain-text") or ""
+            except:
+                pass
+        m = re.search(r'\[.*?,.*?(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})\]', pre_plain)
+        if m:
+            date_str = m.group(1)
+            normalized = re.sub(r'[\-]', '/', date_str)
+            for fmt in ("%d/%m/%Y", "%d/%m/%y", "%m/%d/%Y"):
+                try:
+                    d = datetime.strptime(normalized, fmt)
+                    if d.year < 100:
+                        d = d.replace(year=2000 + d.year)
+                    return d
+                except:
+                    continue
+    except:
+        pass
+    return None
+
+def scroll_to_load_last_n_days(driver, days=5, max_scrolls=150):
+    # FIXED V35: Returns 324 unique texts, not just 17 bubbles
+    if days >= 9999:
+        print("\n=== GETTING ALL MESSAGES (no time limit) ===")
+    else:
+        print(f"\n=== Loading last {days} days messages (FIXED SCROLL V35) ===")
+    cutoff_date = datetime.now() - timedelta(days=days) if days < 9999 else None
+    if cutoff_date:
+        print(f"Cutoff: {cutoff_date.strftime('%d/%m/%Y %H:%M')} (last {days} days)")
+    print(f"Current: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    try:
+        try:
+            main_chat = driver.find_element(By.XPATH, '//div[@id="main"]')
+            main_chat.click()
+            time.sleep(1)
+        except:
+            pass
+        scrollable = None
+        selectors = [
+            'div[data-testid="conversation-panel-messages"]',
+            'div._ak1l',
+            'div[data-testid="chat"] div._ak1l',
+            '#main div._ak1l',
+            '#main',
+        ]
+        for sel in selectors:
+            try:
+                elems = driver.find_elements(By.CSS_SELECTOR, sel)
+                for elem in elems:
+                    try:
+                        if driver.execute_script("return arguments[0].scrollHeight", elem) > driver.execute_script("return arguments[0].clientHeight", elem) + 100:
+                            scrollable = elem
+                            break
+                    except:
+                        continue
+                if scrollable:
+                    break
+            except:
+                continue
+        if not scrollable:
+            scrollable = driver.find_element(By.XPATH, '//div[@id="main"]')
+        driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", scrollable)
+        time.sleep(2)
+        collected_texts = {}
+        bubbles = driver.find_elements(By.XPATH, '//div[@data-testid="msg-container"]')
+        if len(bubbles) < 15:
+            alt = driver.find_elements(By.XPATH, '//div[@data-pre-plain-text]')
+            if len(alt) > len(bubbles):
+                bubbles = alt
+        try:
+            initial_data = driver.execute_script("var b=document.querySelectorAll('[data-testid]');return Array.from(b).map(x=>x.innerText||x.textContent||'').filter(t=>t.trim().length>10);")
+            for txt in initial_data:
+                h = hash(txt[:120])
+                collected_texts[h] = txt
+        except:
+            pass
+        last_count = len(bubbles)
+        no_new = 0
+        actual_max = 500 if days >= 9999 else max_scrolls
+        print(f"  Starting - initial {len(collected_texts)} unique, {last_count} bubbles")
+        for i in range(actual_max):
+            try:
+                driver.execute_script("arguments[0].scrollBy(0, -250)", scrollable)
+                time.sleep(0.4)
+                scrollable.send_keys(Keys.PAGE_UP)
+                time.sleep(0.3)
+            except:
+                pass
+            time.sleep(0.8)
+            try:
+                new_data = driver.execute_script("var b=document.querySelectorAll('[data-testid]');return Array.from(b).map(x=>x.innerText||x.textContent||'').filter(t=>t.trim().length>10);")
+                new_count = 0
+                for txt in new_data:
+                    h = hash(txt[:120])
+                    if h not in collected_texts:
+                        collected_texts[h] = txt
+                        new_count += 1
+                if new_count > 0 or i % 10 == 0:
+                    print(f"  Scroll {i+1}/{actual_max}: {last_count} bubbles, {len(collected_texts)} unique (+{new_count})")
+            except:
+                pass
+            bubbles = driver.find_elements(By.XPATH, '//div[@data-testid="msg-container"]')
+            if len(bubbles) == 0:
+                bubbles = driver.find_elements(By.XPATH, '//div[@data-pre-plain-text]')
+            if len(bubbles) == last_count:
+                no_new += 1
+                if no_new >= 15:
+                    print(f"  No new after {no_new} scrolls, top reached. Unique: {len(collected_texts)}")
+                    break
+            else:
+                no_new = 0
+                last_count = len(bubbles)
+            if days < 9999 and len(bubbles) > 0 and i % 5 == 0:
+                try:
+                    oldest = bubbles[0]
+                    oldest_time = parse_whatsapp_timestamp(oldest)
+                    if oldest_time and oldest_time < cutoff_date:
+                        print(f"    Reached cutoff {oldest_time} < {cutoff_date}, stopping")
+                        break
+                except:
+                    pass
+        driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", scrollable)
+        time.sleep(2)
+        final = driver.find_elements(By.XPATH, '//div[@data-testid="msg-container"]')
+        if len(final) < 15:
+            alt_final = driver.find_elements(By.XPATH, '//div[@data-pre-plain-text]')
+            if len(alt_final) > len(final):
+                final = alt_final
+        print(f"Finished scroll, total: {len(final)} bubbles, {len(collected_texts)} unique texts collected\n")
+        try:
+            with open("collected_messages.json", "w", encoding="utf-8") as cf:
+                json.dump(list(collected_texts.values()), cf, ensure_ascii=False, indent=2)
+        except:
+            pass
+        return collected_texts
+    except Exception as e:
+        print(f"Scroll error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
+def find_group(driver, group_name):
+    for _ in range(3):
+        try:
+            els = driver.find_elements(By.XPATH, f'//span[@title="{group_name}"]')
+            if els:
+                els[0].click()
+                print(f"✅ Found group: {group_name}")
+                return True
+        except:
+            pass
+        time.sleep(1)
+    try:
+        side = driver.find_element(By.XPATH, '//div[@id="pane-side"] | //div[@id="side"]')
+        for _ in range(6):
+            driver.execute_script("arguments[0].scrollTop += 500", side)
+            time.sleep(0.8)
+            partial = driver.find_elements(By.XPATH, '//span[contains(@title, "Janani")]')
+            if partial:
+                partial[0].click()
+                print(f"✅ Found via scroll: {partial[0].text}")
+                return True
+    except:
+        pass
+    print("\n=== MANUAL: Click group, then ENTER ===")
+    input(">>> Press ENTER after clicking group... ")
+    return True
+
+def read_last_n_days():
+    options = webdriver.ChromeOptions()
+    options.add_argument(f"--user-data-dir={os.path.abspath(CHAT_DB_PATH)}")
+    options.add_argument("--start-maximized")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    download_dir = os.path.abspath("temp_bills")
+    os.makedirs(download_dir, exist_ok=True)
+    print(f"[{datetime.now()}] Starting Chrome...")
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    driver.get("https://web.whatsapp.com")
+    print("Waiting for login...")
+    for i in range(90):
+        time.sleep(1)
+        try:
+            driver.find_element(By.XPATH, '//div[@id="side"] | //div[@id="pane-side"]')
+            if len(driver.find_elements(By.XPATH, '//canvas[@aria-label="Scan me!"]')) == 0:
+                print(f"✅ Logged in after {i}s")
+                break
+        except:
+            pass
+    time.sleep(8)
+    if not find_group(driver, GROUP_NAME):
+        driver.quit()
+        return [], set(), set(), set()
+    time.sleep(8)
+    # FIXED V35: Collect 324 unique texts
+    collected = scroll_to_load_last_n_days(driver, days=SCAN_DAYS, max_scrolls=150)
+    print(f"Using {len(collected)} unique texts collected during scroll (fixes 17 bubbles bug)")
+    bubble_data = []
+    for idx, txt in enumerate(collected.values()):
+        bubble_data.append({"idx": idx, "text": txt})
+    print(f"Processing {len(bubble_data)} unique messages...")
+    history = load_history()
+    bill_hashes, bill_files = load_bill_history()
+    print(f"History: {len(history)} sheet, {len(bill_hashes)} bills")
+    if FORCE_MODE:
+        print("⚡ FORCE MODE")
+    print()
+    parsed_entries = []
+    bill_tasks = []
+    skipped_old = 0
+    skipped_non_target = 0
+    skipped_empty = 0
+    cutoff_date = datetime.now() - timedelta(days=SCAN_DAYS) if SCAN_DAYS < 9999 else None
+    for item in bubble_data:
+        try:
+            txt = item["text"].strip()
+            if not txt:
+                continue
+            if len(txt.strip()) < 15:
+                skipped_empty += 1
+                continue
+            if "Sushil" in txt and len(txt) < 60 and "Date-" not in txt:
+                if "Vehicle no-" not in txt:
+                    skipped_empty += 1
+                    continue
+            if cutoff_date:
+                pass
+            if not is_target_message(txt):
+                skipped_non_target += 1
+                if DEBUG_MODE and "date-" in txt.lower():
+                    print(f"NON-TARGET: {txt[:120]}")
+                continue
+            p = parse_message(txt)
+            if p:
+                parsed_entries.append(p)
+        except Exception as e:
+            print(f"Error: {e}")
+            continue
+    print(f"\n=== FILTER SUMMARY ===")
+    print(f"Total: {len(bubble_data)}, Target: {len(parsed_entries)}, Non-target: {skipped_non_target}, Empty: {skipped_empty}")
+    driver.quit()
+    return parsed_entries, history, bill_hashes, bill_files
+
+if __name__ == "__main__":
+    entries, history, bill_hashes, bill_files = read_last_n_days()
+    print(f"\n=== Total TARGET entries: {len(entries)} ===")
+    if not entries:
+        print(f"❌ No target messages")
+        print(f"Try: python janani-webhook.py --all --debug --force")
+    else:
+        if FORCE_MODE:
+            history = load_history()
+        success_count = 0
+        fail_count = 0
+        for idx, e in enumerate(entries):
+            print(f"\n[{idx+1}/{len(entries)}] Pushing {e['payload'].get('vehicle')} {e['payload'].get('date')} {e['payload'].get('type')}...")
+            success = push_to_sheet(e["payload"], history, e["unique_key"])
+            if success:
+                success_count += 1
+            else:
+                fail_count += 1
+            time.sleep(1.5)
+        print(f"\n✅ Done! Pushed {success_count} messages, Failed {fail_count}")
+        if fail_count > 0:
+            print(f"⚠️ {fail_count} failed - check webhook URL in sheet_config.json")
+            print(f"Current: {WEBHOOK_URL}")
+

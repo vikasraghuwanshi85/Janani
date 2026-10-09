@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Janani Fleet</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  body { background:#f8fafc; color:#0f172a; font-family:'Inter', system-ui; }
+  .card { background:#fff; border:1px solid #e2e8f0; border-radius:16px; padding:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05); }
+  .mono { font-family: ui-monospace, monospace; }
+  select { background:#fff; border:1px solid #cbd5e1; }
+  .loader-overlay { position:fixed; inset:0; background:rgba(248,250,252,0.92); backdrop-filter:blur(8px); display:flex; align-items:center; justify-content:center; z-index:9999; flex-direction:column; }
+  .spinner { width:48px; height:48px; border:4px solid #e2e8f0; border-top-color:#4f46e5; border-radius:50%; animation:spin 0.8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  th { cursor:pointer; user-select:none; }
+  th:hover { color:#4f46e5; }
+  .bad { background:#fef2f2; }
+  .good { background:#f0fdf4; }
+</style>
+</head>
+<body class="min-h-screen">
+<div id="loader" class="loader-overlay">
+  <div class="spinner"></div>
+  <h3 class="mt-4 font-semibold">Loading...</h3>
+  <p class="text-sm text-slate-500 mt-1" id="loaderText">Connecting...</p>
+</div>
+
+<div class="max-w-[1600px] mx-auto p-4 md:p-6">
+  <header class="flex flex-wrap items-center justify-between gap-4 mb-6">
+    <div>
+      <h1 class="text-2xl md:text-3xl font-bold text-slate-900">Janani Fleet Management</h1>
+      <p class="text-sm text-slate-500 mt-1">Monthly Fuel & Maintenance Reports • <span id="connStatus" class="font-medium text-amber-600">Loading...</span></p>
+    </div>
+    <div class="flex gap-2 flex-wrap">
+      <button onclick="fetchAll()" class="bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold">Refresh</button>
+      <a href="https://docs.google.com/spreadsheets/d/1ii9MU_bScuYAqtuXGQyKd4QLsgHcwwJJLcfusoo5NWI/edit" target="_blank" class="bg-white border px-4 py-2.5 rounded-xl text-sm">Open Sheet</a>
+    </div>
+  </header>
+
+  <div class="card mb-6">
+    <div class="flex flex-wrap gap-3 items-end">
+      <div><label class="text-xs font-medium block mb-1.5">Month</label><select id="filterMonth" class="rounded-xl px-4 py-2.5 text-sm w-[140px]"><option value="">All Months</option><option value="Jan">January</option><option value="Feb">February</option><option value="Mar">March</option><option value="Apr">April</option><option value="May">May</option><option value="Jun">June</option><option value="Jul">July</option><option value="Aug">August</option><option value="Sep">September</option><option value="Oct">October</option><option value="Nov">November</option><option value="Dec">December</option></select></div>
+      <div><label class="text-xs font-medium block mb-1.5">Year</label><select id="filterYear" class="rounded-xl px-4 py-2.5 text-sm w-[120px]"><option value="">All Years</option></select></div>
+      <div><label class="text-xs font-medium block mb-1.5">Driver</label><select id="filterPilot" class="rounded-xl px-4 py-2.5 text-sm w-[170px]"><option value="">All Drivers</option></select></div>
+      <div><label class="text-xs font-medium block mb-1.5">Vehicle</label><select id="filterVehicle" class="rounded-xl px-4 py-2.5 text-sm w-[170px] mono"><option value="">All Vehicles</option></select></div>
+      <div><label class="text-xs font-medium block mb-1.5">Search</label><input id="searchBox" type="text" placeholder="Vehicle or ODO" class="rounded-xl px-4 py-2.5 text-sm w-[200px] border"></div>
+      <div class="flex gap-2"><button onclick="applyFilter()" class="bg-indigo-600 text-white px-6 py-2.5 rounded-xl text-sm font-semibold">Apply</button><button onclick="setThisMonth()" class="bg-white border px-5 py-2.5 rounded-xl text-sm">This Month</button></div>
+    </div>
+  </div>
+
+  <div id="kpis" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 mb-6"></div>
+
+  <div id="rawDebug" class="card mb-6 hidden">
+    <h3 class="text-sm font-bold text-amber-700">Raw Data Debug (first 3 rows)</h3>
+    <pre id="rawDebugText" class="text-[10px] mono mt-2 bg-slate-50 p-3 rounded overflow-auto max-h-[200px]"></pre>
+  </div>
+
+  <div class="card mb-6">
+    <div class="flex justify-between items-center mb-2 flex-wrap gap-2">
+      <h3 class="text-sm font-bold">All Entries — <span id="monthLabel" class="font-normal text-slate-500"></span> <span id="countBadge" class="ml-2 bg-indigo-50 text-indigo-700 border px-2.5 py-0.5 rounded-full text-[11px]"></span> <span id="vehicleCountBadge" class="ml-2 bg-green-50 text-green-700 border px-2.5 py-0.5 rounded-full text-[11px]"></span></h3>
+    </div>
+    <div class="overflow-auto max-h-[800px] border rounded-xl">
+      <table class="w-full text-xs">
+        <thead class="bg-slate-50 border-b sticky top-0 z-10">
+          <tr>
+            <th class="text-left p-3" onclick="sortBy('date')">Date ↕</th>
+            <th class="p-3">Vehicle ↕</th>
+            <th class="p-3">Type</th>
+            <th class="p-3">Present ODO ↕</th>
+            <th class="p-3">Prev ODO</th>
+            <th class="p-3">KM ↕</th>
+            <th class="p-3">Liters</th>
+            <th class="p-3">Avg</th>
+            <th class="p-3">Diesel Amt</th>
+            <th class="p-3">Bill amount</th>
+            <th class="p-3">Driver</th>
+            <th class="p-3">Location</th>
+            <th class="p-3">Pump</th>
+          </tr>
+        </thead>
+        <tbody id="recentTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="debugPanel" class="card mt-6">
+    <h3 class="text-xs font-bold">Debug Info</h3>
+    <div id="debugTable" class="text-[11px] mono mt-2"></div>
+  </div>
+</div>
+
+<script>
+const WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxv1nErWrIV55nPz0NjXjvc71HMxnaeekujImRkl3y7cz0ptSpsUd3yVJS5jCAuqU4/exec";
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const MONTH_FULL = {"Jan":"January","Feb":"February","Mar":"March","Apr":"April","May":"May","Jun":"June","Jul":"July","Aug":"August","Sep":"September","Oct":"October","Nov":"November","Dec":"December"};
+let allDataCache=[], filteredData=[], hiddenBadRows=[];
+let sortOrder = "desc";
+let currentSortField = "date";
+let showBadRows = false;
+
+function showLoader(t){ document.getElementById('loaderText').textContent=t||'Loading...'; document.getElementById('loader').style.display='flex'; }
+function hideLoader(){ document.getElementById('loader').style.display='none'; }
+
+function jsonp(action, params={}){
+  return new Promise((res,rej)=>{
+    const cb='cb_'+Date.now()+Math.random().toString(36).slice(2);
+    window[cb]=(d)=>{ delete window[cb]; s.remove(); res(d); };
+    const qs=new URLSearchParams({action, ...params, callback:cb, _:Date.now()}).toString();
+    const s=document.createElement('script');
+    s.src=WEBHOOK_URL+'?'+qs;
+    s.onerror=()=>{ delete window[cb]; s.remove(); rej('load failed'); };
+    document.body.appendChild(s);
+    setTimeout(()=>{ if(window[cb]){ delete window[cb]; s.remove(); rej('timeout'); } }, 15000);
+  });
+}
+async function fetchWithFallback(action, params={}){
+  try{
+    const qs=new URLSearchParams({action, ...params, _:Date.now()}).toString();
+    const r=await fetch(WEBHOOK_URL+'?'+qs);
+    return await r.json();
+  }catch(e){
+    return await jsonp(action, params);
+  }
+}
+
+// Robust field getter - handles any case variation
+function getField(r, names){
+  for(let name of names){
+    if(r[name] !== undefined && r[name] !== null && String(r[name]).trim() !== "") return r[name];
+    if(r[name] == 'Date')
+          return r[name];
+    // Try lowercase
+    let lower = name.toLowerCase();
+    for(let k in r){
+      if(k.toLowerCase() === lower && r[k] !== "" && r[k] !== null) return r[k];
+    }
+  }
+  return "";
+}
+
+function extractCleanDate(raw){
+  let m = raw.match(/^(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/);
+  if(m) return m[1].trim(); // Returns "12/9/26" as-is
+}
+
+function parseDateStr(s){
+  let parts = s.split(/[\/\-]/);
+  let d = parseInt(parts[0],10); // Day = first = 12
+  let m = parseInt(parts[1],10)-1; // Month = second = 9-1 = Aug (0-indexed) → Sep
+  let y = parseInt(parts[2],10);
+  if(y<100) y+=2000; // 26 → 2026
+  return new Date(y,m,d); // 12 Sep 2026
+}
+// 12/9/26 → 12-09-2026 (12th Sep 2026) ✓
+// 26-12-08 → 26-12-2008 (26th Dec 2008) ✓
+
+
+function formatTimestamp(ts){
+  if(!ts) return "";
+  try{
+    let d = new Date(ts);
+    if(isNaN(d.getTime())){
+      return String(ts).substring(0,25);
+    }
+    return d.toLocaleString('en-IN', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
+  }catch{
+    return "";
+  }
+}
+
+function getCurrent(){ return {month:MONTHS[new Date().getMonth()], year:String(new Date().getFullYear())}; }
+
+function toggleBadRows(){
+  showBadRows = !showBadRows;
+  document.getElementById('toggleBadBtn').textContent = `Show Bad Rows: ${showBadRows ? 'ON' : 'OFF'}`;
+  document.getElementById('toggleBadBtn').className = showBadRows ? 'bg-amber-100 text-amber-800 border border-amber-300 px-5 py-2.5 rounded-xl text-sm' : 'bg-white border px-5 py-2.5 rounded-xl text-sm';
+  render(filteredData);
+}
+
+function toggleSort(){
+  sortOrder = sortOrder==="desc"?"asc":"desc";
+  document.getElementById('sortBtn').textContent = sortOrder==="desc"?"Sort: Newest First ↓":"Sort: Oldest First ↑";
+  if(filteredData.length) render(filteredData);
+}
+function sortBy(field){
+  currentSortField = field;
+  sortOrder = sortOrder==="desc"?"asc":"desc";
+  if(filteredData.length) render(filteredData);
+}
+function setThisMonth(){
+  const {month,year}=getCurrent();
+  document.getElementById('filterMonth').value=month;
+  const ys=document.getElementById('filterYear');
+  if(ys.querySelector(`option[value="${year}"]`)) ys.value=year;
+  applyFilter();
+}
+async function cleanSheet(){
+  if(!confirm("Delete all malformed rows?")) return;
+  showLoader("Cleaning malformed rows...");
+  try{
+    const res = await fetchWithFallback("clean_malformed");
+    alert(res.message||"Cleaned");
+    fetchAll();
+  }catch(e){ alert("Clean failed: "+e); hideLoader(); }
+}
+
+async function fetchAll(){
+  showLoader('Please wait...');
+  document.getElementById('connStatus').textContent='Loading...';
+  try{
+    const [years, pilots, vehicles, dash] = await Promise.all([
+      fetchWithFallback('get_years').catch(()=>null),
+      fetchWithFallback('get_pilots').catch(()=>null),
+      fetchWithFallback('get_vehicles').catch(()=>null),
+      fetchWithFallback('get_dashboard')
+    ]);
+    if(!dash) throw new Error('No data');
+    if((dash.count===0 || (dash.data||[]).length===0)){
+      showLoader('Checking backup...');
+      const allData = await fetchWithFallback('get_all_data').catch(()=>null);
+      allDataCache = (allData && allData.data) ? allData.data : [];
+    }else{
+      allDataCache = dash.recent || dash.data || [];
+    }
+    allDataCache.sort((a,b)=>{
+      const da = parseDateStr(getField(a, ["Date","date"])) || new Date(0);
+      const db = parseDateStr(getField(b, ["Date","date"])) || new Date(0);
+      return db - da;
+    });
+    
+    document.getElementById('connStatus').textContent=`Ready — ${allDataCache.length} entries`;
+    if(years?.years){
+      const sel=document.getElementById('filterYear'); sel.innerHTML='<option value="">All Years</option>';
+      years.years.forEach(y=>{ const o=document.createElement('option'); o.value=y.year; o.textContent=`${y.year} (${y.count})`; sel.appendChild(o); });
+      const cur=getCurrent().year; if(sel.querySelector(`option[value="${cur}"]`)) sel.value=cur;
+    }
+    if(pilots?.pilots){
+      const sel=document.getElementById('filterPilot'); sel.innerHTML='<option value="">All Drivers</option>';
+      pilots.pilots.forEach(p=>{ if(!p.pilot) return; const o=document.createElement('option'); o.value=p.pilot; o.textContent=`${p.pilot} (${p.count})`; sel.appendChild(o); });
+    }
+    if(vehicles?.vehicles){
+      const sel=document.getElementById('filterVehicle'); sel.innerHTML='<option value="">All Vehicles</option>';
+      vehicles.vehicles.forEach(v=>{ if(!v.vehicle) return; const o=document.createElement('option'); o.value=v.vehicle; o.textContent=`${v.vehicle} (${v.count})`; sel.appendChild(o); });
+    }
+    const cur=getCurrent(); const mSel=document.getElementById('filterMonth'); if(!mSel.value) mSel.value=cur.month;
+    document.getElementById('monthLabel').textContent=MONTH_FULL[mSel.value]||'All';
+    await applyFilter();
+  }catch(e){
+    document.getElementById('connStatus').textContent='Failed: '+e; hideLoader();
+  }
+}
+
+async function applyFilter(){
+  const month=document.getElementById('filterMonth').value;
+  const year=document.getElementById('filterYear').value;
+  const pilot=document.getElementById('filterPilot').value;
+  const vehicle=document.getElementById('filterVehicle').value;
+  const search=document.getElementById('searchBox').value.toLowerCase();
+  showLoader('Filtering...');
+  try{
+    const res=await fetchWithFallback('get_filtered', {month, year, pilot, vehicle, limit:'1000'});
+    filteredData=res.data||[];
+    if(filteredData.length===0 && allDataCache.length>0){
+      filteredData=allDataCache.filter(r=>{
+        const rm=getField(r, ["_sheet","sheet"])||''; 
+        let ry=getField(r, ["_year","year"])||'';
+        if(!ry){ try{ const d=String(getField(r, ["Date","date"])||'').split(/[\/\-]/); if(d.length===3){ let y=parseInt(d[2]); if(y<100) y+=2000; ry=String(y);} }catch(e){} }
+        if(month && rm!==month) return false;
+        if(year && ry!==year) return false;
+        if(vehicle && !String(getField(r, ["Vehicle","vehicle"])||'').toUpperCase().includes(vehicle.toUpperCase())) return false;
+        if(pilot && !String(getField(r, ["Pilot","pilot"])||'').toLowerCase().includes(pilot.toLowerCase())) return false;
+        if(search && !JSON.stringify(r).toLowerCase().includes(search)) return false;
+        return true;
+      });
+    }else if(search){
+      filteredData = filteredData.filter(r=> JSON.stringify(r).toLowerCase().includes(search));
+    }
+    filteredData.sort((a,b)=>{
+      const da = parseDateStr(getField(a, ["Date","date","Timestamp"])) || new Date(0);
+      const db = parseDateStr(getField(b, ["Date","date","Timestamp"])) || new Date(0);
+      if(currentSortField==="timestamp"){
+        const ta = new Date(getField(a, ["Timestamp","timestamp"])||0); const tb = new Date(getField(b, ["Timestamp","timestamp"])||0);
+        const tav = isNaN(ta)?0:ta.getTime(); const tbv = isNaN(tb)?0:tb.getTime();
+        return sortOrder==="desc" ? tbv - tav : tav - tbv;
+      }
+      if(currentSortField==="vehicle"){
+        const va = String(getField(a, ["Vehicle","vehicle"])||'').toLowerCase();
+        const vb = String(getField(b, ["Vehicle","vehicle"])||'').toLowerCase();
+        return sortOrder==="desc" ? vb.localeCompare(va) : va.localeCompare(vb);
+      }
+      return sortOrder==="desc" ? db - da : da - db;
+    });
+    render(filteredData);
+  }catch(e){
+    filteredData=allDataCache; render(filteredData);
+  }
+}
+
+function render(data){
+  hiddenBadRows=[];
+  let goodRows = [];
+  let badRows = [];
+  
+  data.forEach(r=>{
+    const dateRaw = String(getField(r, ["Date","date"])||"");
+    const present = String(getField(r, ["Present ODO","Present Odo","present_odo","present odo"])||"");
+    const prev = String(getField(r, ["Previous ODO","Previous Odo","previous_odo"])||"");
+    const totalKM = String(getField(r, ["Total KM","Total Km","total_km"])||"");
+    const vehicle = String(getField(r, ["Vehicle","vehicle"])||"");
+    const dieselLtr = String(getField(r, ["Diesel Liter","Diesel Liter","diesel_liter"])||"");
+    
+    let isBad = false;
+    let reason = "";
+    if(dateRaw.length>40 && dateRaw.toLowerCase().includes("location")) { isBad=true; reason="date has Location"; }
+    else if(present.length>7) { isBad=true; reason=`present too long ${present.length}`; }
+    else if(totalKM.includes("E+")) { isBad=true; reason="E+ notation"; }
+    else if(totalKM && parseFloat(totalKM)>5000) { isBad=true; reason=`KM >5000: ${totalKM}`; }
+    else if(vehicle.toUpperCase().includes("PRESENTODO")) { isBad=true; reason="vehicle has PRESENTODO"; }
+    else if(dateRaw.includes(",") && dateRaw.includes("Janani")) { isBad=true; reason="CSV copy-paste"; }
+    else if(!vehicle && !present && !totalKM) { isBad=true; reason="empty vehicle+odo"; }
+    
+    if(isBad){
+      hiddenBadRows.push({...r, _badReason: reason});
+      badRows.push(r);
+    }else{
+      goodRows.push(r);
+    }
+  });
+
+  let displayRows = showBadRows ? [...goodRows, ...badRows] : goodRows;
+
+  displayRows.sort((a,b)=>{
+    if(currentSortField==="vehicle"){
+      const va = String(getField(a, ["Vehicle","vehicle"])||'').toLowerCase();
+      const vb = String(getField(b, ["Vehicle","vehicle"])||'').toLowerCase();
+      return sortOrder==="desc" ? vb.localeCompare(va) : va.localeCompare(vb);
+    }
+    const da = parseDateStr(getField(a, ["Date","date","Timestamp"])) || new Date(0);
+    const db = parseDateStr(getField(b, ["Date","date","Timestamp"])) || new Date(0);
+    return sortOrder==="desc" ? db - da : da - db;
+  });
+
+  const fuelData=goodRows.filter(r=>String(getField(r, ["Type","type"])||'').toUpperCase().includes('FUEL'));
+  const maintData=goodRows.filter(r=>String(getField(r, ["Type","type"])||'').toUpperCase().includes('MAINT'));
+
+  const totalKM=fuelData.reduce((a,r)=>a+(parseFloat(String(getField(r, ["Total KM","total_km"])||0).replace(/[^0-9.-]/g,''))||0),0);
+  const totalLtr=fuelData.reduce((a,r)=>a+(parseFloat(String(getField(r, ["Diesel Liter","diesel_liter"])||0).replace(/[^0-9.]/g,''))||0),0);
+  const totalAmt=fuelData.reduce((a,r)=>a+(parseFloat(String(getField(r, ["Diesel Amount","diesel_amount"])||0).replace(/[^0-9.]/g,''))||0),0);
+  const totalBill=maintData.reduce((a,r)=>a+(parseFloat(String(getField(r, ["Bill Amount","bill_amount","Diesel Amount"])||0).replace(/[^0-9.]/g,''))||0),0);
+  const avgFuel=totalLtr? (totalKM/totalLtr).toFixed(2) : '-';
+  const avgMaint=maintData.length? (totalBill/maintData.length).toFixed(0) : '-';
+
+  // Count unique vehicles
+  const uniqueVehicles = new Set(goodRows.map(r=>String(getField(r, ["Vehicle","vehicle"])||'').toUpperCase()).filter(v=>v));
+  
+  document.getElementById('kpis').innerHTML=`
+    <div class="card py-3"><div class="text-[11px] text-slate-500 uppercase">Fuel Trips</div><div class="text-xl font-bold text-indigo-600">${fuelData.length}</div><div class="text-[10px] ${hiddenBadRows.length>0?'text-red-600':'text-green-600'}">${hiddenBadRows.length} bad hidden</div></div>
+    <div class="card py-3"><div class="text-[11px] text-slate-500 uppercase">Vehicles</div><div class="text-xl font-bold text-green-600">${uniqueVehicles.size}</div><div class="text-[10px] text-slate-500">${Array.from(uniqueVehicles).slice(0,3).join(', ')}</div></div>
+    <div class="card py-3"><div class="text-[11px] text-slate-500 uppercase">Total KM</div><div class="text-xl font-bold">${totalKM.toFixed(0)}</div></div>
+    <div class="card py-3"><div class="text-[11px] text-slate-500 uppercase">Liters</div><div class="text-xl font-bold">${totalLtr.toFixed(1)} L</div></div>
+    <div class="card py-3"><div class="text-[11px] text-slate-500 uppercase">Fuel Cost</div><div class="text-xl font-bold">₹${totalAmt.toFixed(0)}</div></div>
+    <div class="card py-3"><div class="text-[11px] text-slate-500 uppercase">Avg Fuel</div><div class="text-xl font-bold">${avgFuel} KM/L</div></div>
+    <div class="card py-3"><div class="text-[11px] text-slate-500 uppercase">Maint Cost</div><div class="text-xl font-bold">₹${totalBill.toFixed(0)}</div></div>
+    <div class="card py-3"><div class="text-[11px] text-slate-500 uppercase">Avg Maint</div><div class="text-xl font-bold">₹${avgMaint}</div></div>
+  `;
+
+  document.getElementById('countBadge').textContent=`${goodRows.length} good • ${hiddenBadRows.length} bad • Sorted ${sortOrder==="desc"?"↓ Newest":"↑ Oldest"}`;
+  document.getElementById('vehicleCountBadge').textContent=`${uniqueVehicles.size} vehicles`;
+  
+  document.getElementById('recentTable').innerHTML=displayRows.map(r=>{
+    const isBad = hiddenBadRows.some(br => br === r || JSON.stringify(br) === JSON.stringify(r)) || r._badReason;
+    console.log('Rendering row:', r, 'isBad:', isBad, 'badReason:', r._badReason);
+    const cleanDate = getField(r, ["Date","date"]);
+    const vehicle = getField(r, ["Vehicle No (Full)","vehicle"])||'';
+    const present = getField(r, ["Present ODO","Present Odo","present_odo"])||'';
+    const prev = getField(r, ["Previous ODO","Previous Odo","previous_odo"])||'';
+    const total = getField(r, ["Total KM","total_km"])||'';
+    const liter = getField(r, ["Diesel Liter","diesel_liter"])||'';
+    const avg = getField(r, ["Average","average"])||'';
+    const amt = getField(r, ["Diesel Amount","diesel_amount"])||'';
+    const pilot = getField(r, ["Pilot","pilot"])||'';
+    const location = getField(r, ["Location","location"])||'';
+    const pump = getField(r, ["Pump","pump"])||'';
+    const type = getField(r, ["Type","type"])||'';
+    const bill_amt = getField(r, ["Bill Amount","Bill Amount"]);
+    const hasVehicle = vehicle && String(vehicle).trim() !== "";
+    const hasOdo = present && String(present).trim() !== "";
+    
+    return `<tr class="border-b hover:bg-slate-50 ${isBad?'bad':''} ${!hasVehicle||!hasOdo?'bg-amber-50':''}">
+      <td class="p-3 mono font-semibold">${cleanDate||'<span class="text-slate-400">-</span>'} ${isBad?`<span class="text-[9px] text-red-600">(${r._badReason||'bad'})</span>`:''}</td>
+      <td class="p-3 mono font-bold ${hasVehicle?'text-green-700':'text-red-600'}">${vehicle||'<span class="text-red-500">NO VEHICLE</span>'}</td>
+      <td class="p-3"><span class="px-2 py-1 rounded-full text-[10px] font-semibold ${String(type||'').toUpperCase().includes('FUEL')?'bg-indigo-50 text-indigo-700 border':'bg-amber-50 text-amber-700 border'}">${String(type||'').toUpperCase().includes('FUEL')?'Fuel':'Maint'}</span></td>
+      <td class="p-3 mono font-semibold ${hasOdo?'text-indigo-700':'text-red-600'}">${present||'<span class="text-red-500">NO ODO</span>'}</td>
+      <td class="p-3 mono">${prev||'-'}</td>
+      <td class="p-3 mono font-bold">${total||'-'}</td>
+      <td class="p-3 mono">${liter||'-'}</td>
+      <td class="p-3 mono text-indigo-600 font-semibold">${avg||'-'}</td>
+      <td class="p-3 mono">₹${amt||'-'}</td>
+      <td class="p-3">₹${bill_amt||'<span class="text-red-500"></span>'}</td>
+      <td class="p-3">${pilot||'-'}</td>
+      <td class="p-3">${location||'-'}</td>
+      <td class="p-3">${pump||'-'}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('debugTable').innerHTML = `
+    <div>Total: ${data.length} | Good: ${goodRows.length} | Bad: ${hiddenBadRows.length} | ShowBad: ${showBadRows}</div>
+    <div>Unique Vehicles: ${Array.from(uniqueVehicles).join(', ') || 'NONE - This is the bug!'}</div>
+    <div class="mt-2">Bad reasons: ${hiddenBadRows.slice(0,10).map(r=>`${getField(r, ["Vehicle No (Full)","vehicle"])||'NO_VEH'}:${getField(r, ["Present ODO","present_odo"])||'NO_ODO'} (${r._badReason})`).join(' | ')}</div>
+    <div class="mt-2 text-[9px]">First row keys: ${data.length>0 ? Object.keys(data[0]).join(', ') : 'no data'}</div>
+  `;
+
+  hideLoader();
+}
+
+window.addEventListener('load', fetchAll);
+document.getElementById('searchBox')?.addEventListener('keyup', (e)=>{ if(e.key==='Enter') applyFilter(); });
+</script>
+</body>
+</html>

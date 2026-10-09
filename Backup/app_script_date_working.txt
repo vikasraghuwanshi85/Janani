@@ -1,0 +1,283 @@
+/**
+ * JANANI FLEET - FINAL V61 - ABSOLUTE FIX FOR ISO DATE BUG
+ * Bug: Sheet shows "2026-09-11T18:30:00.000Z" instead of "12-09-2026"
+ * Cause: Sheets auto-converts "12-09-2026" to Date at midnight IST (00:00)
+ *         JSON.stringify Date -> "2026-09-11T18:30:00.000Z" (previous day UTC)
+ * Fix: Store with leading apostrophe '12-09-2026 to force TEXT, set format to @ before append
+ */
+
+var SHEET_ID = "1ii9MU_bScuYAqtuXGQyKd4QLsgHcwwJJLcfusoo5NWI";
+var BILL_IMAGES_FOLDER_ID = "1fGcvEMxynl9MNsADvpqFQEf1elDbrFgH";
+
+function jsonResponse(obj){
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// V61: Direct string, no timezone
+function parseDate(dateStr){
+  try{
+    var original = String(dateStr || "").trim();
+    if(!original) throw "empty";
+    var parts = original.split(/[\/\-]/);
+    if(parts.length == 3){
+      var d = parseInt(parts[0],10), m = parseInt(parts[1],10), y = parseInt(parts[2],10);
+      if(isNaN(d) || isNaN(m) || isNaN(y)) throw "NaN";
+      if(y < 100) y += 2000;
+      if(m >= 1 && m <= 12 && d >= 1 && d <= 31){
+        var dd = ("0" + d).slice(-2);
+        var mm = ("0" + m).slice(-2);
+        var yyyy = y;
+        var folder = dd + "-" + mm + "-" + yyyy;
+        var months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+        return {folder: folder, monthName: months[m-1], year: y, original: original, v: "V61"};
+      }
+    }
+    throw "Invalid";
+  }catch(e){
+    var now = new Date();
+    var months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    var dd = ("0" + now.getDate()).slice(-2);
+    var mm = ("0" + (now.getMonth()+1)).slice(-2);
+    return {folder: dd + "-" + mm + "-" + now.getFullYear(), monthName: months[now.getMonth()], year: now.getFullYear(), original: dateStr, v: "V61 fallback"};
+  }
+}
+
+function cleanSpecialChars_(str){
+  if(!str) return "";
+  return String(str).trim().replace(/^[^A-Za-z0-9]+/, '').replace(/^[\/\\\-:;.,]+/, '').trim();
+}
+
+function doPost(e){
+  try{
+    var data = {};
+    if(e.postData && e.postData.contents){
+      try{ data = JSON.parse(e.postData.contents); }catch(err){ data = e.parameter || {}; }
+    }else{ data = e.parameter || {}; }
+    
+    if(data.action == "test_date"){
+      var parsed = parseDate(data.date || "12/09/26");
+      return jsonResponse({v:"V61 POST", input: data.date, folder: parsed.folder, expected:"12-09-2026", isCorrect: parsed.folder=="12-09-2026", parsed: parsed});
+    }
+    if(data.action == "fix_dates"){
+      return fixExistingDates_();
+    }
+
+    var parsedForMonth = parseDate(data.date);
+    var month = data.month || parsedForMonth.monthName || "Unknown";
+    var MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec","Unknown"];
+    if(MONTHS.indexOf(month) === -1) month = "Unknown";
+
+    var ss = SpreadsheetApp.openById(SHEET_ID);
+    var sheet = ss.getSheetByName(month);
+    if(!sheet){
+      sheet = ss.insertSheet(month);
+      sheet.appendRow(["Date", "Location", "Vehicle", "Type", "Present ODO", "Previous ODO", "Total KM", "Diesel Amount", "Diesel Liter", "Rate/L", "Average", "Bill Amount", "Work Details", "Pilot", "Pump", "Source", "Image URL", "Timestamp"]);
+      // FIX: Set entire Date column to TEXT before any data
+      sheet.getRange("A:A").setNumberFormat("@");
+      sheet.getRange(1,1,1,18).setFontWeight("bold").setBackground("#4285f4").setFontColor("white");
+      sheet.setFrozenRows(1);
+    }else{
+      // FIX: Ensure Date column is TEXT
+      try{ sheet.getRange("A:A").setNumberFormat("@"); }catch(e){}
+    }
+
+    var vehicle = String(data.vehicle || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    var parsedDateForStorage = parseDate(data.date);
+    var date = parsedDateForStorage ? parsedDateForStorage.folder : String(data.date || "").trim();
+    date = date.replace(/\//g, "-");
+
+    // V61 CRITICAL FIX: Force TEXT with leading apostrophe
+    // '12-09-2026 in Sheets = text, not date. Without ', Sheets converts to Date -> ISO -> 11th
+    var dateForSheet = "'" + date; // Leading ' forces text
+
+    var presentOdo = String(data.present_odo || "").trim().replace(/\D/g, '').substring(0,7);
+    var previousOdo = String(data.previous_odo || "").trim().replace(/\D/g, '').substring(0,7);
+    var type = String(data.type || "FUEL").trim().toUpperCase();
+    type = type.indexOf("MAINT") >=0 ? "MAINTENANCE" : "FUEL";
+
+    // Duplicate check - compare without '
+    var allData = sheet.getDataRange().getValues();
+    for(var i=1; i<allData.length; i++){
+      var rDate = String(allData[i][0]||"").trim().replace(/^'/, ''); // Remove ' for comparison
+      var rVehicle = String(allData[i][2]||"").trim().toUpperCase();
+      if(rDate == date && rVehicle == vehicle){
+        var rPresent = String(allData[i][4]||"").trim();
+        if(rPresent == presentOdo){
+          return jsonResponse({success:true, status:"duplicate", month: month, duplicate:true, dateStored: date});
+        }
+      }
+    }
+
+    // Append with dateForSheet that has leading '
+    sheet.appendRow([
+      dateForSheet, // '12-09-2026 forces text
+      cleanSpecialChars_(String(data.location||"").trim()),
+      vehicle,
+      type,
+      presentOdo,
+      previousOdo,
+      String(data.total_km||"").trim(),
+      String(data.diesel_amount||"").trim(),
+      String(data.diesel_liter||"").trim(),
+      String(data.rate||"").trim(),
+      String(data.average||"").trim(),
+      String(data.bill_amount||"").trim(),
+      cleanSpecialChars_(String(data.work_details||"").trim()),
+      String(data.pilot||"").trim(),
+      String(data.pump||"").trim(),
+      String(data.source||"").trim(),
+      String(data.image_url||"").trim(),
+      new Date()
+    ]);
+
+    // Force text format after append
+    var lastRow = sheet.getLastRow();
+    try{
+      sheet.getRange(lastRow, 1).setNumberFormat("@");
+      // Re-set without ' for display but keep as text - actually keep with '
+      // Sheets will display without ' but store as text
+    }catch(e){}
+
+    return jsonResponse({success:true, status:"inserted", month: month, duplicate:false, dateStored: date, dateForSheet: dateForSheet, dateInput: data.date, parsed: parsedDateForStorage});
+  }catch(err){
+    return jsonResponse({success:false, status:"error", error: String(err)});
+  }
+}
+
+function fixExistingDates_(){
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  var fixed = 0;
+  MONTHS.forEach(function(m){
+    var sh = ss.getSheetByName(m);
+    if(!sh || sh.getLastRow() <= 1) return;
+    var range = sh.getRange("A:A");
+    try{ range.setNumberFormat("@"); }catch(e){}
+    var data = sh.getDataRange().getValues();
+    for(var i=1; i<data.length; i++){
+      var val = data[i][0];
+      if(val instanceof Date){
+        // Convert Date object back to DD-MM-YYYY
+        var d = val.getDate();
+        var mo = val.getMonth()+1;
+        var y = val.getFullYear();
+        // Add 1 day if it was midnight IST issue? Actually Date is already shifted
+        // If stored as 11th 18:30 UTC, it was meant to be 12th
+        // Check: if hours are 18:30 UTC, add 1 day
+        var hours = val.getUTCHours();
+        if(hours == 18 || hours == 19){
+          // This was midnight IST -> add 1 day
+          var corrected = new Date(val.getTime() + 24*60*60*1000);
+          d = corrected.getDate();
+          mo = corrected.getMonth()+1;
+          y = corrected.getFullYear();
+        }
+        var dd = ("0" + d).slice(-2);
+        var mm = ("0" + mo).slice(-2);
+        var folder = dd + "-" + mm + "-" + y;
+        sh.getRange(i+1, 1).setNumberFormat("@");
+        sh.getRange(i+1, 1).setValue("'" + folder);
+        fixed++;
+      }else if(String(val).indexOf("T") > 0 && String(val).indexOf("Z") > 0){
+        // ISO string like 2026-09-11T18:30:00.000Z
+        try{
+          var dt = new Date(val);
+          var corrected = new Date(dt.getTime() + 24*60*60*1000);
+          if(dt.getUTCHours() == 18 || dt.getUTCHours() == 19){
+            var dd = ("0" + corrected.getDate()).slice(-2);
+            var mm = ("0" + (corrected.getMonth()+1)).slice(-2);
+            var folder = dd + "-" + mm + "-" + corrected.getFullYear();
+            sh.getRange(i+1, 1).setNumberFormat("@");
+            sh.getRange(i+1, 1).setValue("'" + folder);
+            fixed++;
+          }
+        }catch(e){}
+      }
+    }
+  });
+  return jsonResponse({success:true, message: "Fixed " + fixed + " dates with ISO bug", fixed: fixed, v: "V61 fix_dates"});
+}
+
+function doGet(e){
+  try{
+    var params = e.parameter || {};
+    var action = String(params.action || "").trim().toLowerCase();
+    
+    if(action == "test_date"){
+      var dateInput = params.date || "12/09/26";
+      try{ dateInput = decodeURIComponent(dateInput); }catch(err){}
+      var parsed = parseDate(dateInput);
+      return jsonResponse({
+        v: "V61 FIXED ISO BUG",
+        input: dateInput,
+        folder: parsed.folder,
+        expected: "12-09-2026",
+        isCorrect: parsed.folder === "12-09-2026",
+        explanation: "Previous bug: 12-09-2026 stored as Date -> JSON -> 2026-09-11T18:30:00.000Z (11th). Now stored as text '12-09-2026",
+        allParams: params
+      });
+    }
+    
+    if(action == "fix_dates"){
+      return fixExistingDates_();
+    }
+    
+    if(action == "get_dashboard"){
+      var ss = SpreadsheetApp.openById(SHEET_ID);
+      var MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+      var allData = [];
+      MONTHS.forEach(function(m){
+        var sh = ss.getSheetByName(m);
+        if(!sh || sh.getLastRow() <= 1) return;
+        var data = sh.getDataRange().getValues();
+        var headers = data[0];
+        for(var i=1; i<data.length; i++){
+          var obj = {};
+          for(var c=0; c<headers.length && c<data[i].length; c++){
+            var val = data[i][c];
+            // FIX: If val is Date, convert to DD-MM-YYYY, not ISO
+            if(val instanceof Date){
+              var dd = ("0" + val.getDate()).slice(-2);
+              var mm = ("0" + (val.getMonth()+1)).slice(-2);
+              var yyyy = val.getFullYear();
+              // Check if this was the midnight bug - if UTC hours 18:30, add 1 day
+              if(val.getUTCHours() == 18 || val.getUTCHours() == 19){
+                var corrected = new Date(val.getTime() + 24*60*60*1000);
+                dd = ("0" + corrected.getDate()).slice(-2);
+                mm = ("0" + (corrected.getMonth()+1)).slice(-2);
+                yyyy = corrected.getFullYear();
+              }
+              val = dd + "-" + mm + "-" + yyyy;
+            }else if(typeof val == "string" && val.indexOf("T") > 0 && val.indexOf("Z") > 0){
+              // ISO string already
+              try{
+                var dt = new Date(val);
+                var dd = ("0" + dt.getDate()).slice(-2);
+                var mm = ("0" + (dt.getMonth()+1)).slice(-2);
+                var yyyy = dt.getFullYear();
+                if(dt.getUTCHours() == 18 || dt.getUTCHours() == 19){
+                  var corrected = new Date(dt.getTime() + 24*60*60*1000);
+                  dd = ("0" + corrected.getDate()).slice(-2);
+                  mm = ("0" + (corrected.getMonth()+1)).slice(-2);
+                  yyyy = corrected.getFullYear();
+                }
+                val = dd + "-" + mm + "-" + yyyy;
+              }catch(e){}
+            }
+            // Remove leading ' for display
+            if(typeof val == "string") val = val.replace(/^'/, '');
+            obj[headers[c]] = val;
+          }
+          obj["_sheet"] = m;
+          allData.push(obj);
+        }
+      });
+      return jsonResponse({success:true, v:"V61 FIXED ISO", data: allData, count: allData.length, sampleDate: allData.length>0 ? allData[0].Date : "none"});
+    }
+    
+    return jsonResponse({v:"V61", message:"Use ?action=test_date&date=12-09-26 or ?action=get_dashboard or ?action=fix_dates to fix old ISO dates", dateTest: parseDate("12/09/26")});
+    
+  }catch(err){
+    return jsonResponse({success:false, error: String(err), v:"V61 error"});
+  }
+}

@@ -1,0 +1,178 @@
+/**
+ * JANANI FINAL FIXED - For sheet 1Xc-hqnuDnyp4Q3zbHITRAW1VU0X6RK5gyKqYUPaV1kg
+ * FIXES: Invalid response shape {"success":true,"month":"All Logs","duplicate":false}
+ * 
+ * Problem: Old Apps Script returned All Logs and only {success:true} -> Python thought invalid
+ * Fix: Now returns BOTH success and status, never All Logs, and includes sheets+data for dashboard
+ * 
+ * Deploy: Extensions → Apps Script → Paste → Save → Deploy → New Version
+ */
+
+var SHEET_ID = "1Xc-hqnuDnyp4Q3zbHITRAW1VU0X6RK5gyKqYUPaV1kg";
+
+function doPost(e) {
+  try {
+    var data;
+    if (e.postData && e.postData.contents) {
+      try { data = JSON.parse(e.postData.contents); } catch(err) { data = e.parameter; }
+    } else { data = e.parameter; }
+    
+    // Handle actions
+    if (data.action == "delete_sheet" && data.sheet_name) {
+      var ss = SpreadsheetApp.openById(SHEET_ID);
+      var sh = ss.getSheetByName(data.sheet_name);
+      if(sh) ss.deleteSheet(sh);
+      return jsonResponse({success:true, status:"deleted", month: data.sheet_name, duplicate:false});
+    }
+    if (data.action == "remove_all_logs_sheet" || data.action == "deleteAllLogsSheet") {
+      var ss = SpreadsheetApp.openById(SHEET_ID);
+      var sh = ss.getSheetByName("All Logs");
+      if(sh) ss.deleteSheet(sh);
+      return jsonResponse({success:true, status:"deleted", month:"All Logs", duplicate:false});
+    }
+    if (data.action == "clear_all_logs") {
+      var ss = SpreadsheetApp.openById(SHEET_ID);
+      ss.getSheets().forEach(function(s){ if(s.getLastRow()>1) s.deleteRows(2, s.getLastRow()-1); });
+      return jsonResponse({success:true, status:"cleared", month:"All", duplicate:false});
+    }
+    if (data.action == "upload_bill") { return handleBillUpload(data); }
+
+    // FIXED: Never use All Logs, only month sheets
+    var month = data.month || "Unknown";
+    // Fix All Logs bug - if month is All Logs, derive from date
+    if (month == "All Logs") {
+      // Try to parse date to get real month
+      if (data.date) {
+        var parsed = parseDate(data.date);
+        if (parsed) month = parsed.monthName;
+        else month = "Unknown";
+      } else {
+        month = "Unknown";
+      }
+    }
+    if (!month || month == "All Logs") month = "Unknown";
+
+    var ss = SpreadsheetApp.openById(SHEET_ID);
+    var sheet = ss.getSheetByName(month);
+    if (!sheet) {
+      sheet = ss.insertSheet(month);
+      sheet.appendRow(["Date", "Location", "Vehicle", "Type", "Present ODO", "Previous ODO", "Total KM", "Diesel Amount", "Diesel Liter", "Average", "Bill Amount", "Work Details", "Pilot", "Pump", "Source", "Timestamp"]);
+      sheet.getRange(1,1,1,16).setFontWeight("bold").setBackground("#4285f4").setFontColor("white");
+    }
+
+    // Check duplicate
+    var isDuplicate = false;
+    try {
+      var lastRows = sheet.getDataRange().getValues();
+      for (var i=1; i<lastRows.length; i++) {
+        if (lastRows[i][0]==data.date && lastRows[i][2]==data.vehicle && lastRows[i][4]==data.present_odo) {
+          isDuplicate = true; break;
+        }
+      }
+    } catch(e) {}
+
+    if (!isDuplicate) {
+      sheet.appendRow([
+        data.date||"", data.location||"", data.vehicle||"", data.type||"",
+        data.present_odo||"", data.previous_odo||"", data.total_km||"",
+        data.diesel_amount||"", data.diesel_liter||"", data.average||"",
+        data.bill_amount||"", data.work_details||"", data.pilot||"", data.pump||"",
+        data.source||"Janani", new Date()
+      ]);
+    }
+
+    // FIXED: Return BOTH success and status for compatibility - NEVER All Logs
+    return jsonResponse({
+      success: true,
+      status: "success",
+      month: month,
+      duplicate: isDuplicate,
+      message: isDuplicate ? "duplicate" : "added"
+    });
+
+  } catch(err) {
+    return jsonResponse({success:false, status:"error", message: err.toString(), month:"Error", duplicate:false});
+  }
+}
+
+function handleBillUpload(data) {
+  try {
+    var folderName = data.date_folder || "Bills";
+    var folders = DriveApp.getFoldersByName(folderName);
+    var folder = folders.hasNext() ? folders.next() : DriveApp.createFolder(folderName);
+    var fileName = data.filename || "bill.jpg";
+    var base64Data = data.filedata;
+    if (base64Data.indexOf(",")>-1) base64Data = base64Data.split(",")[1];
+    var blob = Utilities.newBlob(Utilities.base64Decode(base64Data), data.mimeType||"image/jpeg", fileName);
+    if (folder.getFilesByName(fileName).hasNext()) {
+      return jsonResponse({success:true, status:"exists", month: folderName, duplicate:true, filename: fileName});
+    }
+    var file = folder.createFile(blob);
+    return jsonResponse({success:true, status:"success", month: folderName, duplicate:false, fileId: file.getId(), filename: fileName});
+  } catch(err) {
+    return jsonResponse({success:false, status:"error", message: err.toString()});
+  }
+}
+
+function doGet(e) {
+  try {
+    var ss = SpreadsheetApp.openById(SHEET_ID);
+    var allData = [];
+    var sheetNames = [];
+    var sheets = ss.getSheets();
+    
+    for (var s=0; s<sheets.length; s++) {
+      var sheet = sheets[s];
+      var name = sheet.getName();
+      sheetNames.push(name);
+      if (name=="All Logs") continue; // Skip All Logs for dashboard
+      var lastRow = sheet.getLastRow();
+      if (lastRow<2) continue;
+      var values = sheet.getRange(1,1,lastRow, Math.min(sheet.getLastColumn(),16)).getValues();
+      var headers = values[0];
+      for (var r=1; r<values.length; r++) {
+        var row = values[r];
+        if (!row[0] && !row[2]) continue;
+        var obj = {};
+        for (var c=0; c<headers.length && c<row.length; c++) obj[headers[c]] = row[c];
+        obj["_sheet"] = name;
+        obj["_row"] = r+1;
+        allData.push(obj);
+      }
+    }
+
+    // Return BOTH success and status for compatibility with Python and dashboard
+    return jsonResponse({
+      success: true,
+      status: "ok",
+      message: "Janani Webhook Active - Dashboard Sync - Fixed All Logs bug",
+      sheetId: SHEET_ID,
+      sheets: sheetNames,
+      count: allData.length,
+      data: allData,
+      month: "All", // For compatibility
+      duplicate: false,
+      timestamp: new Date().toISOString()
+    });
+  } catch(err) {
+    return jsonResponse({success:false, status:"error", message: err.toString(), stack: err.stack});
+  }
+}
+
+function jsonResponse(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function parseDate(str) {
+  if (!str) return null;
+  var parts = str.split(/[/\-]/);
+  if (parts.length!=3) return null;
+  var d = parseInt(parts[0],10), m = parseInt(parts[1],10), y = parseInt(parts[2],10);
+  if (isNaN(d)||isNaN(m)||isNaN(y)) return null;
+  if (y<100) y+=2000;
+  var MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  if (m>=1 && m<=12) return {day:d, monthNum:m, monthName:MONTHS[m-1], year:y};
+  return null;
+}
+
+function doOptions(e) { return jsonResponse({}); }
