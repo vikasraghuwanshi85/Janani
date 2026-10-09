@@ -72,6 +72,10 @@ For offline or custom Chrome installations, add `chrome_binary` and `chromedrive
 
 Configuration, history, the sync lock, and the WhatsApp profile resolve beside the Python file, even when launched from another working directory.
 
+## Complete Google Apps Script
+
+Use [apps_script/Janani.gs](apps_script/Janani.gs) as a single-file replacement containing the vehicle, fuel validation, bill date-folder, duplicate/retry, and dashboard fixes. Follow the [deployment instructions](apps_script/DEPLOY_COMPLETE.md); do not keep duplicate helper definitions alongside the bundle. Live deployment is performed through Apps Script.
+
 ## Vehicle IDs from WhatsApp
 
 Vehicle IDs come from the WhatsApp report itself, not from a location-to-vehicle mapping. Supported labels include `Vehicle no`, `Vehicle No.`, `Vehicle No (Full)`, `Vehicle Number`, `Vehicle ID`, `Veh No`, and `Registration No`. For example:

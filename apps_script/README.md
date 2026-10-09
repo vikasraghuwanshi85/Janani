@@ -1,3 +1,5 @@
+Use [the complete single-file script](Janani.gs) with [full replacement instructions](DEPLOY_COMPLETE.md) if you want all fixes together. The modular installation below remains available for an existing project.
+
 # Fix the deployed V79 fuel-column mapping
 
 The supplied V79 script maps only the header `Vehicle`. October uses `Vehicle No (Full)`, so `rowData` receives an empty value for that column despite Python sending `vehicle: "7412"`. The same header map omits `Timestamp`. V79's duplicate check also assumes fixed column positions, even though its row writer allows columns to move.
