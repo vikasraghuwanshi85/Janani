@@ -52,7 +52,7 @@ Run `run_daily.bat` manually once before scheduling, complete the QR login if ne
 
 Replace `C:\Janani` with your actual project folder. Keep the computer awake, connected to the Internet, and your account logged on. You may enable **Wake the computer to run this task** and **Run task as soon as possible after a scheduled start is missed** if suitable for your machine.
 
-Use Task Scheduler's **Run** action to test the task. Check `daily_log.txt` for login, collection, and webhook results. A zero exit code or Task Scheduler success alone does not establish that reports were uploaded. An expired WhatsApp session requires another QR login. The current browser workflow is interactive and is not validated for **Run whether user is logged on or not**.
+Use Task Scheduler's **Run** action to test the task. Check `daily_log.txt` for login, collection, and webhook results. The program now checks the deployment before opening WhatsApp, returns exit code 2 if that check fails, and exit code 1 if an upload fails or no messages are collected. A zero exit code may mean all collected records were already in history; check the `[RESULT]` counts for actual confirmations. An expired WhatsApp session requires another QR login. The current browser workflow is interactive and is not validated for **Run whether user is logged on or not**.
 
 ## Configuration
 
@@ -106,6 +106,8 @@ Retries after a lost webhook response require server-side idempotency in Apps Sc
 
 ## Logs and troubleshooting
 
+Run `run_windows.bat --check-webhook` to test the configured URL without opening WhatsApp or sending any fuel reports or bill images. It requires the complete V82 or newer Apps Script and verifies its full-year date-folder response. Every normal run performs this check first. See [complete deployment instructions](apps_script/DEPLOY_COMPLETE.md) for replacing the script and publishing a new deployment version. The check verifies the HTTP handler, not spreadsheet/Drive permissions; successful uploads verify those separately.
+
 | Symptom | Check |
 | --- | --- |
 | Missing Python environment | Run `setup_windows.bat` and confirm `.venv\Scripts\python.exe` exists |
@@ -114,6 +116,8 @@ Retries after a lost webhook response require server-side idempotency in Apps Sc
 | Bill skipped for its date | Add a valid date to the caption or check that WhatsApp message-date metadata is available |
 | Suspicious odometer warning | Correct the source reading; use `--debug-fuel` to inspect parsing |
 | Upload timeout or webhook error | Inspect the Apps Script deployment, access permissions, and execution logs before retrying |
+| `Script function not found: doGet` or `doPost` | Paste the entire `apps_script/Janani.gs`, save, and deploy a **new version** of the web app; verify the `/exec` URL in `sheet_config.json` |
+| Google returns HTML or a login page | Use the deployed `/exec` URL with **Execute as: Me** and **Who has access: Anyone**, as required by the current Python client |
 | Another sync is running | Let the existing run finish; keep Task Scheduler's non-overlapping setting enabled |
 
 Do not delete push history, remove browser profile locks, or use `--force` as a general repair. Confirm the cause first. `daily_log.txt` grows as runs append output; archive it periodically if needed.

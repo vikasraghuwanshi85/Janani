@@ -6,6 +6,7 @@ JANANI FLEET - V78 - FIXED FUEL NOT PUSHING + DEBUG MODE
 - Fixed fuel parsing edge cases
 
 Usage:
+python janani-webhook.py --check-webhook
 python janani-webhook.py --days 7 --debug-fuel
 python janani-webhook.py --days 1 --force --debug-fuel
 
@@ -15,6 +16,68 @@ the caption or WhatsApp metadata; undated bills and invalid odometers are skippe
 
 import os, re, time, requests, json, hashlib, sys, io, platform, base64, tempfile, shutil
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
+from urllib.parse import urlparse
+
+
+class WebhookProtocolError(RuntimeError):
+    """The deployment did not return the JSON contract required for uploads."""
+
+
+class WebhookPageText(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.hidden = 0
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ('script', 'style'):
+            self.hidden += 1
+
+    def handle_endtag(self, tag):
+        if tag in ('script', 'style') and self.hidden:
+            self.hidden -= 1
+
+    def handle_data(self, data):
+        if not self.hidden:
+            self.parts.append(data)
+
+
+def webhook_json(response):
+    text = response.text.lstrip('\ufeff').strip()
+    if text.startswith('<'):
+        page = WebhookPageText()
+        page.feed(text)
+        detail = re.sub(r'\s+', ' ', ' '.join(page.parts)).strip()[:600]
+        host = urlparse(getattr(response, 'url', '') or '').hostname or 'webhook'
+        raise WebhookProtocolError(
+            f'Google returned HTML from {host}: {detail or "no readable error"}. '
+            'Deploy the complete apps_script/Janani.gs as a new web-app version; '
+            'check its /exec URL and access settings. History was not updated.')
+    response.raise_for_status()
+    try:
+        result = json.loads(text)
+    except ValueError:
+        raise WebhookProtocolError('Webhook returned invalid JSON; history was not updated.')
+    if not isinstance(result, dict):
+        raise WebhookProtocolError('Webhook returned a non-object JSON response; history was not updated.')
+    return result
+
+
+def check_webhook():
+    """Read-only deployment check; never sends report or image data."""
+    parsed_url = urlparse(WEBHOOK_URL)
+    if parsed_url.scheme != 'https' or parsed_url.hostname != 'script.google.com' or not parsed_url.path.endswith('/exec'):
+        raise WebhookProtocolError('Set webhook_url to the deployed https://script.google.com/macros/s/.../exec URL, not /dev or an editor URL.')
+    response = requests.get(WEBHOOK_URL, params={'action': 'test_date', 'date': '09/10/26'}, timeout=30)
+    result = webhook_json(response)
+    if result.get('success') is False:
+        raise WebhookProtocolError('Deployment check failed: ' + str(result.get('error', 'unknown Apps Script error')))
+    version = re.match(r'^V(\d+)\b', str(result.get('v', '')))
+    if not version or int(version.group(1)) < 82 or result.get('folderFull') != '09-10-2026':
+        raise WebhookProtocolError('The URL is not serving the complete V82 (or newer) script with full-year date folders. Save Janani.gs, then Deploy > Manage deployments > Edit > New version > Deploy.')
+    print('[CHECK] Webhook ' + str(result['v']) + ': JSON response and date-folder check passed')
+    return result
 
 def detect_windows():
     info = {"is_windows": platform.system() == "Windows", "is_win8_family": False,
@@ -1002,6 +1065,13 @@ def read_last_n_days(days=30):
         return [], set()
 
 if __name__ == "__main__":
+    try:
+        check_webhook()
+    except Exception as ex:
+        print(f'[FAIL] Webhook check: {ex}')
+        sys.exit(2)
+    if '--check-webhook' in sys.argv:
+        sys.exit(0)
     print("="*60)
     print(f"JANANI V78 FIXED FUEL NOT PUSHING - {DAYS_TO_SCAN} Days")
     print(f"Force: {FORCE_PUSH} | Debug Fuel: {DEBUG_FUEL}")
@@ -1013,7 +1083,8 @@ if __name__ == "__main__":
     print(f"History: {len(history)} entries")
     if not entries:
         print("[FAIL] No messages")
-        print("[HINT] Try: python FINAL_janani_webhook.py --days 1 --debug-fuel --force")
+        print("[HINT] Try: python janani-webhook.py --days 1 --debug-fuel")
+        sys.exit(1)
     else:
         fuel_entries = [e for e in entries if e.get('type') == 'FUEL']
         print(f"\nFuel entries found: {len(fuel_entries)}")
@@ -1033,10 +1104,13 @@ if __name__ == "__main__":
                 print("\n⚠️ No new entries! If you have new fuel entry but it's not pushing:")
                 print("  1. It might already be in pushed_history.json with same key")
                 print("  2. Check the original message and debug output; preserve push history")
-                print("  3. Or run with --force flag: python FINAL_janani_webhook.py --days 1 --force")
+                print("  3. For an intentional fuel replay only: python janani-webhook.py --days 1 --force")
                 print("  4. Or run with --debug-fuel to see why fuel parsing failed")
         
         push_list = to_push
+        confirmed_pushes = 0
+        failed_pushes = 0
+        attempted_pushes = 0
         
         for idx, e in enumerate(push_list):
             payload = e['payload']
@@ -1046,32 +1120,32 @@ if __name__ == "__main__":
             print(f"[{idx+1}/{len(push_list)}] {has_img} {payload['vehicle']} {payload['date']} {payload['type']} | {size:.1f}KB -> {target}")
             
             try:
+                attempted_pushes += 1
                 r = requests.post(WEBHOOK_URL, json=payload, timeout=90)
-                r.raise_for_status()
-                resp_text = r.text
-                if resp_text.strip().startswith("<!DOCTYPE"):
-                    print(f"  -> ❌ APPS SCRIPT ERROR")
-                    continue
-                print(f"  -> {resp_text[:800]}")
-                try:
-                    j = json.loads(resp_text)
-                except ValueError:
-                    print("  -> Unconfirmed webhook response; history not updated")
-                    continue
-                if not isinstance(j, dict):
-                    print("  -> Invalid webhook response; history not updated")
-                    continue
+                j = webhook_json(r)
+                print(f"  -> {json.dumps(j, ensure_ascii=False)[:800]}")
                 if j.get("success") is True or j.get("duplicate") is True:
                     history.update(bill_history_keys(e))
                     save_history(history)
+                    confirmed_pushes += 1
                     if j.get("sheet"):
                         print(f"  -> Inserted into: {j['sheet']}")
                     if j.get("duplicate"):
                         print("  -> Already present; recorded in local history")
                 else:
+                    failed_pushes += 1
                     print("  -> Webhook did not confirm success; history not updated")
                 time.sleep(2)
+            except WebhookProtocolError as ex:
+                failed_pushes += 1
+                print(f'  -> [FAIL] {ex}')
+                print('[STOP] Remaining reports were not sent; fix the deployment before retrying.')
+                break
             except Exception as ex:
+                failed_pushes += 1
                 print(f"  Push failed: {ex}")
         
-        print("\n[DONE] V78")
+        print(f'\n[RESULT] Confirmed: {confirmed_pushes}; failed: {failed_pushes}; not attempted: {len(push_list) - attempted_pushes}')
+        if failed_pushes:
+            sys.exit(1)
+        print("[DONE] Janani sync")

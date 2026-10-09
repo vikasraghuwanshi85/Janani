@@ -171,7 +171,8 @@ class VehicleIdTests(unittest.TestCase):
                     if isinstance(node, ast.If) and isinstance(node.test, ast.Compare) and any(isinstance(value, ast.Constant) and value.value == '__main__' for value in node.test.comparators))
         namespace = dict(app.__dict__, __name__='__main__', FORCE_PUSH=False,
                          read_last_n_days=lambda **kwargs: ([entry], set()),
-                         acquire_push_lock=lambda: Mock(), save_history=Mock())
+                         acquire_push_lock=lambda: Mock(), save_history=Mock(),
+                         check_webhook=lambda: None)
         response = Mock(text='{"success":true}')
         with patch.object(app.requests, 'post', return_value=response) as post, patch.object(app.time, 'sleep'), patch('builtins.print'):
             exec(compile(ast.Module(body=[main], type_ignores=[]), str(SOURCE), 'exec'), namespace)
@@ -181,6 +182,112 @@ class VehicleIdTests(unittest.TestCase):
             self.assertEqual(sent[field], '7412')
         self.assertEqual(sent['month'], 'Oct')
         namespace['save_history'].assert_called_once()
+
+
+class WebhookDeploymentTests(unittest.TestCase):
+    def response(self, text, url='https://script.google.com/macros/s/example/exec'):
+        return Mock(text=text, url=url)
+
+    def run_main(self, namespace):
+        main = next(node for node in ast.parse(SOURCE.read_text()).body
+                    if isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+                    and any(isinstance(value, ast.Constant) and value.value == '__main__'
+                            for value in node.test.comparators))
+        exec(compile(ast.Module(body=[main], type_ignores=[]), str(SOURCE), 'exec'), namespace)
+
+    def test_html_google_error_is_reported_without_script_noise(self):
+        response = self.response('\ufeff <!doctype html><title>Error</title><script>private javascript</script>'
+                                 '<style>body{}</style><div>Script function not found: doGet</div>')
+        with self.assertRaises(app.WebhookProtocolError) as error:
+            app.webhook_json(response)
+        self.assertIn('Script function not found: doGet', str(error.exception))
+        self.assertNotIn('private javascript', str(error.exception))
+        self.assertNotIn('body{}', str(error.exception))
+
+    def test_login_page_is_reported(self):
+        response = self.response('<html><body>Sign in to continue</body></html>', 'https://accounts.google.com/')
+        with self.assertRaisesRegex(app.WebhookProtocolError, 'accounts.google.com.*Sign in'):
+            app.webhook_json(response)
+
+    def test_invalid_json_and_array_are_not_confirmations(self):
+        for body in ['upstream error', '[{"success":true}]', 'null']:
+            with self.subTest(body=body), self.assertRaises(app.WebhookProtocolError):
+                app.webhook_json(self.response(body))
+
+    def test_read_only_preflight_checks_version_and_folder(self):
+        response = self.response('{"success":true,"v":"V82","folderFull":"09-10-2026"}')
+        with patch.object(app.requests, 'get', return_value=response) as get, patch.object(app.requests, 'post') as post, patch('builtins.print'):
+            self.assertEqual(app.check_webhook()['v'], 'V82')
+        self.assertEqual(get.call_args.kwargs['params'], {'action': 'test_date', 'date': '09/10/26'})
+        post.assert_not_called()
+
+    def test_old_wrong_or_failed_deployment_is_rejected(self):
+        for body in ['{"v":"V79 FIXED COL SHIFT","folderFull":"09-10-2026"}',
+                     '{"v":"V82","folderFull":"09-10-26"}',
+                     '{"success":false,"error":"Drive access denied","v":"V82"}']:
+            with self.subTest(body=body), patch.object(app.requests, 'get', return_value=self.response(body)), self.assertRaises(app.WebhookProtocolError):
+                app.check_webhook()
+
+    def test_dev_url_is_rejected_without_network(self):
+        with patch.object(app, 'WEBHOOK_URL', 'https://script.google.com/macros/s/example/dev'), patch.object(app.requests, 'get') as get:
+            with self.assertRaisesRegex(app.WebhookProtocolError, '/exec'):
+                app.check_webhook()
+        get.assert_not_called()
+
+    def test_failed_preflight_stops_before_browser_or_uploads(self):
+        namespace = dict(app.__dict__, __name__='__main__',
+                         check_webhook=Mock(side_effect=app.WebhookProtocolError('Script function not found: doGet')),
+                         read_last_n_days=Mock(), acquire_push_lock=Mock(), save_history=Mock())
+        with patch.object(app.requests, 'post') as post, patch('builtins.print'), self.assertRaises(SystemExit) as error:
+            self.run_main(namespace)
+        self.assertEqual(error.exception.code, 2)
+        namespace['read_last_n_days'].assert_not_called()
+        namespace['acquire_push_lock'].assert_not_called()
+        namespace['save_history'].assert_not_called()
+        post.assert_not_called()
+
+    def test_check_only_skips_browser(self):
+        namespace = dict(app.__dict__, __name__='__main__', check_webhook=Mock(), read_last_n_days=Mock())
+        with patch.object(sys, 'argv', ['janani-webhook.py', '--check-webhook']), self.assertRaises(SystemExit) as error:
+            self.run_main(namespace)
+        self.assertEqual(error.exception.code, 0)
+        namespace['check_webhook'].assert_called_once()
+        namespace['read_last_n_days'].assert_not_called()
+
+    def test_html_upload_stops_batch_preserves_history_and_fails_schedule(self):
+        entry = bill()
+        history = set()
+        namespace = dict(app.__dict__, __name__='__main__', FORCE_PUSH=False,
+                         check_webhook=lambda: None, read_last_n_days=lambda **kwargs: ([entry, entry], history),
+                         acquire_push_lock=lambda: Mock(), save_history=Mock(),
+                         select_entries_to_push=lambda *args, **kwargs: [entry, entry])
+        with patch.object(app.requests, 'post', return_value=self.response('<html>Script function not found: doPost</html>')) as post, patch('builtins.print'), self.assertRaises(SystemExit) as error:
+            self.run_main(namespace)
+        self.assertEqual(error.exception.code, 1)
+        post.assert_called_once()
+        self.assertEqual(history, set())
+        namespace['save_history'].assert_not_called()
+
+    def test_json_rejection_does_not_update_history(self):
+        entry = bill()
+        history = set()
+        namespace = dict(app.__dict__, __name__='__main__', FORCE_PUSH=False,
+                         check_webhook=lambda: None, read_last_n_days=lambda **kwargs: ([entry], history),
+                         acquire_push_lock=lambda: Mock(), save_history=Mock())
+        with patch.object(app.requests, 'post', return_value=self.response('{"success":false,"error":"Drive access denied"}')), patch.object(app.time, 'sleep'), patch('builtins.print'), self.assertRaises(SystemExit) as error:
+            self.run_main(namespace)
+        self.assertEqual(error.exception.code, 1)
+        self.assertEqual(history, set())
+        namespace['save_history'].assert_not_called()
+
+    def test_http_error_is_not_confirmation(self):
+        response = self.response('{"success":true}')
+        response.raise_for_status.side_effect = app.requests.HTTPError('503 unavailable')
+        with self.assertRaises(app.requests.HTTPError):
+            app.webhook_json(response)
+
+
+class VehicleLabelTests(unittest.TestCase):
 
     def test_supported_labels_send_vehicle_to_webhook(self):
         labels = ['Vehicle no', 'Vehicle No.', 'Vehicle No (Full)', 'Vehicle Number',
