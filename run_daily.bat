@@ -1,5 +1,8 @@
 @echo off
 setlocal
+rem Chrome requires Task Scheduler: Run only when user is logged on.
+chcp 65001 >nul
+set "PYTHONIOENCODING=utf-8"
 rem Keep this file beside janani-webhook.py. Run setup_windows.bat once first.
 rem Default scan covers 2 days. Do not use --force for the daily schedule.
 pushd "%~dp0"
