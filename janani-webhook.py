@@ -64,7 +64,7 @@ WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxv1nErWrIV55nPz0NjXjvc71
 HISTORY_FILE = local_path("pushed_history.json")
 MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
-DEFAULT_DAYS = 2
+DEFAULT_DAYS = 10
 DAYS_TO_SCAN = DEFAULT_DAYS
 DEBUG_MODE = "--debug" in sys.argv
 DEBUG_FUEL = "--debug-fuel" in sys.argv
