@@ -8,7 +8,7 @@ set "PYTHONIOENCODING=utf-8"
 >>"daily_log.txt" echo.
 >>"daily_log.txt" echo [%DATE% %TIME%] Starting Janani
 
-python -u "janani_webhook.py" --debug --debug-fuel >>"daily_log.txt" 2>&1
+python -u "janani-webhook.py" --debug --debug-fuel >>"daily_log.txt" 2>&1
 set "JANANI_EXIT=%errorlevel%"
 
 >>"daily_log.txt" echo [%DATE% %TIME%] Finished with exit code %JANANI_EXIT%
