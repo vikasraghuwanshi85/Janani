@@ -700,17 +700,43 @@ def wait_for_whatsapp_login(driver, timeout=180):
     return False
 
 
+def find_whatsapp_search(driver, timeout=30):
+    # WhatsApp sometimes renders the search above #side, or as an input.
+    # Never fall back to an arbitrary editable node (which may be a composer).
+    selector = (
+        '#side [contenteditable="true"], #side input[type="text"], #side input[type="search"], '
+        '[data-testid="chat-list-search"] [contenteditable="true"], '
+        '[data-testid="chat-list-search"] input, '
+        '[contenteditable="true"][data-tab="3"], '
+        '[role="search"] [contenteditable="true"], [role="search"] input, '
+        'input[aria-label*="Search"], input[placeholder*="Search"], '
+        '[contenteditable="true"][aria-label*="Search"]')
+    for elapsed in range(timeout):
+        for box in driver.find_elements(By.CSS_SELECTOR, selector):
+            try:
+                if (box.is_displayed() and box.is_enabled()
+                        and not driver.execute_script("return !!arguments[0].closest('#main');", box)):
+                    return box
+            except Exception:
+                continue  # The UI may replace nodes while chats load.
+        if elapsed == 0:
+            print('[INFO] Waiting for WhatsApp chat search to load (up to 30s).')
+        time.sleep(1)
+    print('[FAIL] No visible chat-search field was found after waiting. '
+          'Check whether WhatsApp has finished loading its chat list. '
+          'The search layout may have changed; message composer was not used.')
+    return None
+
+
 def find_group(driver, group_name):
+    search_box = find_whatsapp_search(driver)
+    if search_box is None:
+        return False
     aliases = GROUP_ALIASES if group_name == GROUP_NAME else [group_name] + GROUP_ALIASES
     for attempt_name in aliases:
         try:
             print(f"[INFO] Searching for group: {attempt_name}")
             try:
-                boxes = driver.find_elements(By.CSS_SELECTOR,
-                    '#side [contenteditable="true"][role="textbox"], '
-                    '#side [contenteditable="true"], '
-                    '[data-testid="chat-list-search"] [contenteditable="true"]')
-                search_box = next(box for box in boxes if box.is_displayed())
                 search_box.click()
                 time.sleep(0.5)
                 search_box.send_keys(Keys.CONTROL + "a")
@@ -719,13 +745,17 @@ def find_group(driver, group_name):
                 search_box.send_keys(attempt_name)
                 time.sleep(2)
             except Exception as exc:
-                print(f'[WARN] Could not use the WhatsApp sidebar search: {exc}')
+                print(f'[WARN] Could not use the WhatsApp chat search: {type(exc).__name__}: {exc}')
+                search_box = find_whatsapp_search(driver)
+                if search_box is None:
+                    return False
                 continue
-            elems = driver.find_elements(By.CSS_SELECTOR, '#pane-side [title], #side [role="listitem"] [title]')
+            elems = driver.find_elements(By.CSS_SELECTOR, '#pane-side [title], #side [role="listitem"] [title], [data-testid="chat-list"] [title], [role="grid"] [title]')
             for elem in elems:
                 try:
                     title = (elem.get_attribute("title") or elem.text or "").strip()
                     if not elem.is_displayed(): continue
+                    if driver.execute_script("return !!arguments[0].closest('#main');", elem): continue
                     if ' '.join(title.split()).casefold() == ' '.join(attempt_name.split()).casefold():
                         try:
                             elem.click()

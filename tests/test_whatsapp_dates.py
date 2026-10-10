@@ -43,6 +43,23 @@ class WhatsAppDateTests(unittest.TestCase):
     def bill(identifier, extra=''):
         return '<div data-id="' + identifier + '">Bill<img src="blob:http://example/bill">' + extra + '</div>'
 
+    def test_chat_search_supports_input_outside_side_and_excludes_composer(self):
+        from test_webhook import app
+        self.driver.get('about:blank')
+        self.driver.execute_script('document.body.innerHTML=arguments[0]',
+            '<div id="main"><input aria-label="Search" id="composer"></div>'
+            '<input aria-label="Search chats" id="chat-search">')
+        field = app.find_whatsapp_search(self.driver, timeout=1)
+        self.assertEqual(field.get_attribute('id'), 'chat-search')
+
+    def test_chat_search_supports_editable_data_tab_outside_side(self):
+        from test_webhook import app
+        self.driver.get('about:blank')
+        self.driver.execute_script('document.body.innerHTML=arguments[0]',
+            '<div contenteditable="true" data-tab="3" id="chat-search"></div>')
+        field = app.find_whatsapp_search(self.driver, timeout=1)
+        self.assertEqual(field.get_attribute('id'), 'chat-search')
+
     def test_image_only_uses_preceding_date_separator(self):
         rows = self.collect('<div>06/10/2026</div>' + self.bill('a') + '<div>08/10/2026</div>' + self.bill('b'))
         self.assertEqual([r['messageDate'] for r in rows], ['06/10/2026', '08/10/2026'])

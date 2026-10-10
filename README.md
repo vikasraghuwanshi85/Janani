@@ -37,13 +37,9 @@ run_windows.bat --days 7 --debug-fuel
 
 ## Run daily with Windows Task Scheduler
 
-`run_daily.bat` automatically sets up its own Python 3.12, packages, Chrome for Testing, and matching ChromeDriver on **Windows 10/11**, then runs WhatsApp collection and webhook uploads. You do not need to install Python, Chrome, or run `setup_windows.bat` first for this launcher. Copy the **complete project**, including `scripts/bootstrap_windows.ps1` and `requirements.txt`; the BAT alone is insufficient. PowerShell supplied with Windows performs the setup without administrator rights.
+`run_daily.bat` directly runs the installed `python` with `janani-webhook.py --days 2 --debug --debug-fuel`. It appends both normal output and errors to `daily_log.txt` and returns Python's exit code. Python must be on PATH and the packages in `requirements.txt` must already be installed in that Python environment. This simple launcher does not download or install a runtime, and does not call another BAT.
 
-The first run downloads several hundred MB over HTTPS and may take several minutes. Internet/proxy access must allow python.org, bootstrap.pypa.io, pypi.org, files.pythonhosted.org, googlechromelabs.github.io, and storage.googleapis.com. Later runs reuse `.janani-runtime/current`; no driver-list download by Selenium Manager is needed. Setup failures stop the sync, are logged, and return exit code 2. Keep the project in a writable local folder. Organization policies may block downloads, PowerShell scripts, or downloaded executables.
-
-The runtime is local to the computer where it was set up. When moving the project to another computer, omit `.janani-runtime`, `.venv`, and `whatsapp_session_janani`; let setup recreate the runtime and log in again. Preserve or transfer push history appropriately for the same workflow to avoid historical replays. Browser updates are not downloaded every day: to refresh the portable runtime, close its Chrome, rename `.janani-runtime/current` to an archive name, and run the launcher again. Keep the saved runtime until the replacement works. Existing `setup_windows.bat` / `run_windows.bat` remain available for the separately installed Python workflow.
-
-The daily scan covers two days by default, appends output to `daily_log.txt`, and returns the sync's exit code. The two-day overlap and duplicate checks prevent acknowledged entries from being sent again. Explicit runtime browser/driver paths take precedence over `sheet_config.json` browser settings when using this launcher; group and webhook settings still apply. Windows 7/8/8.1 and XP/Vista cannot use this current browser/runtime; this is not an offline or universally compatible BAT file.
+The two-day overlap and duplicate checks prevent acknowledged entries from being sent again. Settings in `sheet_config.json` can override the scan period. If the log says 3,650 days or debug is off, check the actual BAT path and arguments in Task Scheduler, plus any `days` configuration; the current daily command requests two days and enables both debug flags.
 
 Run `run_daily.bat` manually once before scheduling, complete the QR login if needed, and check the log. Then open **Task Scheduler → Create Task**:
 
@@ -119,7 +115,7 @@ Run `run_windows.bat --check-webhook` to test the configured URL without opening
 | Missing Python environment | Run `setup_windows.bat` and confirm `.venv\Scripts\python.exe` exists |
 | Chrome cannot start | Check the browser/driver versions and configured paths; close other Chrome instances using the Janani profile |
 | WhatsApp login did not complete | Scan QR in the Chrome window opened by Janani, and allow chats to load within the 180-second wait. Login in another browser profile does not log in this one. Group search is skipped on timeout. |
-| Group not found after login | Confirm the logged-in account belongs to the group. Set `group_name` in `sheet_config.json` to the exact visible name, including any emoji. Search uses the chat sidebar and exact names. |
+| Group not found after login | Confirm the logged-in account belongs to the group. Set `group_name` in `sheet_config.json` to the exact visible name, including any emoji. Search supports editable fields and text inputs, waits up to 30 seconds for them to load, excludes the message composer, and matches exact chat names. |
 | Bill skipped for its date | Add a valid date to the caption or check that WhatsApp message-date metadata is available |
 | Suspicious odometer warning | Correct the source reading; use `--debug-fuel` to inspect parsing |
 | Upload timeout or webhook error | Inspect the Apps Script deployment, access permissions, and execution logs before retrying |

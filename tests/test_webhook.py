@@ -447,6 +447,7 @@ class WhatsAppLoginTests(unittest.TestCase):
 
     def test_group_search_only_clicks_exact_sidebar_match(self):
         driver = Mock()
+        driver.execute_script.return_value = False
         box = Mock(is_displayed=Mock(return_value=True))
         wrong = Mock(is_displayed=Mock(return_value=True))
         wrong.get_attribute.return_value = 'Janani Other Group'
@@ -468,6 +469,15 @@ class WhatsAppLoginTests(unittest.TestCase):
             self.assertFalse(app.find_group(driver, app.GROUP_NAME))
         driver.find_element.assert_not_called()
         driver.execute_script.assert_not_called()
+
+    def test_search_waits_for_field_to_appear(self):
+        driver = Mock()
+        driver.execute_script.return_value = False
+        box = Mock()
+        driver.find_elements.side_effect = [[], [], [box]]
+        with patch.object(app.time, 'sleep') as sleep, patch('builtins.print'):
+            self.assertIs(app.find_whatsapp_search(driver, timeout=3), box)
+        self.assertEqual(sleep.call_count, 2)
 
 
 app_wait = app.wait_for_whatsapp_login
