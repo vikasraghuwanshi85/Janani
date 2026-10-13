@@ -7,3 +7,5 @@ daily_log.txt
 __pycache__/
 *.pyc
 pushed_history.json.lock
+bill_ocr_cache.json
+bill_ocr_cache.json.lock

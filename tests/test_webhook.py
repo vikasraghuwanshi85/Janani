@@ -28,9 +28,9 @@ def bill(date='08/10/2026', image=IMAGE):
 
 class ParsingTests(unittest.TestCase):
     def test_separate_digit_not_concatenated(self):
-        payload = app.parse_message(fuel('361260', '360541 4'))['payload']
-        self.assertEqual(payload['previous_odo'], '360541')
-        self.assertEqual(payload['total_km'], '719')
+        result, errors = app.parse_message_debug(fuel('361260', '360541 4'))
+        self.assertIsNone(result)
+        self.assertIn('Invalid odometer', errors[0])
 
     def test_screenshot_bad_readings_skipped(self):
         for present, previous in [('361260', '3605414'), ('360541', '3598913')]:
@@ -71,30 +71,80 @@ class ParsingTests(unittest.TestCase):
     def test_normal_digit_rollover(self):
         self.assertEqual(app.parse_message(fuel('100001', '99999'))['payload']['total_km'], '2')
 
-    def test_bill_explicit_date_folder(self):
+    def test_bill_date_is_metadata_only(self):
         p = bill()['payload']
-        self.assertEqual(p['date_folder'], '08-10-2026')
+        self.assertEqual(p['date_folder'], '')
         self.assertEqual(p['original_date'], '08/10/26')
         self.assertEqual(p['target_sheet'], 'Bill log')
 
     def test_image_only_message_date(self):
         p = app.parse_message('[IMAGE_ONLY_BILL]', IMAGE, message_date='06/10/2026')['payload']
-        self.assertEqual(p['date_folder'], '06-10-2026')
+        self.assertEqual(p['date'], '06/10/26')
+        self.assertEqual(p['date_folder'], '')
 
-    def test_no_date_or_invalid_date_skips_bill(self):
-        self.assertIsNone(app.parse_message('[IMAGE_ONLY_BILL]', IMAGE))
+    def test_missing_bill_date_is_blank_and_invalid_date_is_rejected(self):
+        p = app.parse_message('[IMAGE_ONLY_BILL]', IMAGE)['payload']
+        self.assertEqual(p['date'], '')
+        self.assertEqual(p['original_date'], '')
         self.assertIsNone(bill('31/02/2026'))
 
     def test_bill_caption_date_with_display_time(self):
         payload = app.parse_message('Date - 08/10/2026 10:30 AM\nVehicle no - 7412', IMAGE)['payload']
-        self.assertEqual(payload['date_folder'], '08-10-2026')
+        self.assertEqual(payload['date'], '08/10/26')
 
     def test_caption_date_overrides_message_date(self):
         p = app.parse_message('Date - 06/10/2026', IMAGE, message_date='08/10/2026')['payload']
-        self.assertEqual(p['date_folder'], '06-10-2026')
+        self.assertEqual(p['date'], '06/10/26')
 
     def test_invalid_image_skipped(self):
         self.assertIsNone(bill(image='not base64!'))
+
+    def test_fuel_numbers_with_currency_units_and_grouping(self):
+        message = fuel('361260 km', '360541 kms').replace('4197.2', '₹4,197.20').replace('41.54', '41.54 liters')
+        payload = app.parse_message(message)['payload']
+        self.assertEqual(payload['diesel_amount'], '4197.20')
+        self.assertEqual(payload['diesel_liter'], '41.54')
+        self.assertEqual(payload['total_km'], '719')
+
+    def test_extra_numeric_text_is_not_concatenated_or_truncated(self):
+        for value in ('4197.2 5', '4,19,7.2', '4197x2', '-4197.2', '4197.2.5', '9' * 400):
+            with self.subTest(value=value):
+                self.assertIsNone(app.parse_message(fuel('361260', '360541').replace('4197.2', value)))
+
+    def test_zero_or_missing_fuel_values_are_rejected(self):
+        message = fuel('361260', '360541')
+        for text in (message.replace('41.54', '0'), message.replace('4197.2', '0'),
+                     message.replace('Previous odo - 360541\n', ''),
+                     message.replace('Diesel liter - 41.54', '')):
+            with self.subTest(text=text):
+                self.assertIsNone(app.parse_message(text))
+
+    def test_source_calculation_conflicts_are_rejected(self):
+        message = fuel('361260', '360541')
+        for extra, error in (('Total KM - 718', 'Total KM'), ('Average - 3.3', 'Average'), ('Rate/L - 5', 'Rate')):
+            with self.subTest(extra=extra):
+                result, errors = app.parse_message_debug(message + '\n' + extra)
+                self.assertIsNone(result)
+                self.assertIn(error, errors[0])
+
+    def test_matching_source_calculations_and_markdown_are_preserved(self):
+        message = fuel('361260', '360541') + '\nTotal KM - 719\nAverage - 17.31 km/ltr\nRate/L - 101.04'
+        message = message.replace('Diesel amount', '*Diesel amount*')
+        payload = app.parse_message(message)['payload']
+        self.assertEqual(payload['average'], '17.31')
+        self.assertEqual(payload['rate'], '101.04')
+
+    def test_invalid_fuel_date_is_not_substituted_with_today(self):
+        for value in ('31/02/2026', '08/10/20260', 'not known'):
+            with self.subTest(value=value):
+                result, errors = app.parse_message_debug(fuel('361260', '360541').replace('08/10/2026', value), message_date='08/10/2026')
+                self.assertIsNone(result)
+                self.assertIn('report date', errors[0])
+
+    def test_undated_fuel_requires_actual_whatsapp_date(self):
+        message = fuel('361260', '360541').replace('Date - 08/10/2026\n', '')
+        self.assertIsNone(app.parse_message(message))
+        self.assertEqual(app.parse_message(message, message_date='08/10/2026')['payload']['date'], '08/10/26')
 
 
 class DedupTests(unittest.TestCase):
@@ -130,6 +180,28 @@ class DedupTests(unittest.TestCase):
     def test_force_still_works_for_fuel(self):
         entry = app.parse_message(fuel('361260', '360541'))
         self.assertEqual(app.select_entries_to_push([entry], {entry['unique_key']}, force=True), [entry])
+
+    def test_fuel_content_changes_are_not_hidden_by_same_odometer_history(self):
+        original = app.parse_message(fuel('361260', '360541'))
+        edited = app.parse_message(fuel('361260', '360541').replace('4197.2', '4297.2'))
+        history = app.bill_history_keys(original)
+        self.assertTrue(app.already_pushed(original, history))
+        self.assertFalse(app.already_pushed(edited, history))
+        self.assertEqual(app.select_entries_to_push([edited], history), [edited])
+
+    def test_conflicting_same_reading_messages_are_held_before_posting(self):
+        original = app.parse_message(fuel('361260', '360541'))
+        edited = app.parse_message(fuel('361260', '360541').replace('4197.2', '4297.2'))
+        with patch('builtins.print'):
+            pending = app.select_entries_to_push([original, edited], set())
+        self.assertEqual(pending, [])
+        self.assertIn('Conflicting fuel', pending.scan_issues[0])
+
+    def test_legacy_fuel_history_is_preserved_with_explicit_diagnostic(self):
+        entry = app.parse_message(fuel('361260', '360541'))
+        with patch('builtins.print') as output:
+            self.assertEqual(app.select_entries_to_push([entry], {entry['unique_key']}), [])
+        self.assertIn('Legacy fuel record', output.call_args.args[0])
 
     def test_history_roundtrip_and_corruption(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(app, 'HISTORY_FILE', str(Path(directory) / 'history.json')):
@@ -215,14 +287,17 @@ class WebhookDeploymentTests(unittest.TestCase):
                 app.webhook_json(self.response(body))
 
     def test_read_only_preflight_checks_version_and_folder(self):
-        response = self.response('{"success":true,"v":"V82","folderFull":"09-10-2026"}')
+        response = self.response('{"success":true,"v":"V84","billFolders":{"fuel":"Fuel","maintenance":"Maintanence"}}')
         with patch.object(app.requests, 'get', return_value=response) as get, patch.object(app.requests, 'post') as post, patch('builtins.print'):
-            self.assertEqual(app.check_webhook()['v'], 'V82')
+            self.assertEqual(app.check_webhook()['v'], 'V84')
         self.assertEqual(get.call_args.kwargs['params'], {'action': 'test_date', 'date': '09/10/26'})
         post.assert_not_called()
 
     def test_old_wrong_or_failed_deployment_is_rejected(self):
         for body in ['{"v":"V79 FIXED COL SHIFT","folderFull":"09-10-2026"}',
+                     '{"v":"V83","folderFull":"09-10-2026"}',
+                     '{"v":"V84","billFolders":{"fuel":"Fuel","maintenance":"Maintenance"}}',
+                     '{"v":"V82","folderFull":"09-10-2026"}',
                      '{"v":"V82","folderFull":"09-10-26"}',
                      '{"success":false,"error":"Drive access denied","v":"V82"}']:
             with self.subTest(body=body), patch.object(app.requests, 'get', return_value=self.response(body)), self.assertRaises(app.WebhookProtocolError):
@@ -260,6 +335,7 @@ class WebhookDeploymentTests(unittest.TestCase):
         namespace = dict(app.__dict__, __name__='__main__', FORCE_PUSH=False,
                          check_webhook=lambda: None, read_last_n_days=lambda **kwargs: ([entry, entry], history),
                          acquire_push_lock=lambda: Mock(), save_history=Mock(),
+                         classify_bill_for_upload=lambda entry: None,
                          select_entries_to_push=lambda *args, **kwargs: [entry, entry])
         with patch.object(app.requests, 'post', return_value=self.response('<html>Script function not found: doPost</html>')) as post, patch('builtins.print'), self.assertRaises(SystemExit) as error:
             self.run_main(namespace)
@@ -273,7 +349,8 @@ class WebhookDeploymentTests(unittest.TestCase):
         history = set()
         namespace = dict(app.__dict__, __name__='__main__', FORCE_PUSH=False,
                          check_webhook=lambda: None, read_last_n_days=lambda **kwargs: ([entry], history),
-                         acquire_push_lock=lambda: Mock(), save_history=Mock())
+                         acquire_push_lock=lambda: Mock(), save_history=Mock(),
+                         classify_bill_for_upload=lambda entry: None)
         with patch.object(app.requests, 'post', return_value=self.response('{"success":false,"error":"Drive access denied"}')), patch.object(app.time, 'sleep'), patch('builtins.print'), self.assertRaises(SystemExit) as error:
             self.run_main(namespace)
         self.assertEqual(error.exception.code, 1)
@@ -347,6 +424,15 @@ class VehicleLabelTests(unittest.TestCase):
 
 
 class WindowsCompatibilityTests(unittest.TestCase):
+    def test_cli_days_and_group_override_saved_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'sheet_config.json').write_text('{"days":3650,"group_name":"Saved Group"}')
+            namespace = {'__name__': 'janani_config_probe', '__file__': str(Path(directory, SOURCE.name))}
+            with patch.object(sys, 'argv', [SOURCE.name, '--days', '2', '--group', 'Exact Group']):
+                exec(compile(SOURCE.read_text(), str(SOURCE), 'exec'), namespace)
+            self.assertEqual(namespace['DAYS_TO_SCAN'], 2)
+            self.assertEqual(namespace['GROUP_NAME'], 'Exact Group')
+
     def test_windows_versions(self):
         for major, minor, legacy, unsupported in [(5, 1, True, True), (6, 0, True, True),
                 (6, 1, True, False), (6, 2, True, False), (6, 3, True, False), (10, 0, False, False)]:
@@ -453,14 +539,29 @@ class WhatsAppLoginTests(unittest.TestCase):
         wrong.get_attribute.return_value = 'Janani Other Group'
         right = Mock(is_displayed=Mock(return_value=True))
         right.get_attribute.return_value = 'Janani AI Reporting'
-        driver.find_elements.side_effect = [[box], [wrong, right]]
+        driver.find_elements.side_effect = [[box], [wrong, right], [right]]
         with patch.object(app.time, 'sleep'), patch('builtins.print'):
             self.assertTrue(app.find_group(driver, app.GROUP_NAME))
         wrong.click.assert_not_called()
         right.click.assert_called_once()
-        for call in driver.find_elements.call_args_list:
+        for call in driver.find_elements.call_args_list[:2]:
             self.assertIn('#side', call.args[1])
         box.send_keys.assert_any_call(app.GROUP_NAME)
+
+    def test_shorter_query_does_not_open_a_different_alias_group(self):
+        driver = Mock()
+        driver.execute_script.return_value = False
+        box = Mock(is_displayed=Mock(return_value=True))
+        alias = Mock(is_displayed=Mock(return_value=True))
+        alias.get_attribute.return_value = 'Janani'
+        driver.find_elements.side_effect = lambda _by, selector: [box] if 'contenteditable' in selector else [alias]
+        with patch.object(app.time, 'sleep'), patch('builtins.print'):
+            self.assertFalse(app.find_group(driver, app.GROUP_NAME))
+        alias.click.assert_not_called()
+
+    def test_group_name_ignores_directional_marks_but_keeps_emoji(self):
+        self.assertEqual(app.normalize_chat_name('\u200eJanani  AI Reporting\u200f'), app.normalize_chat_name('Janani AI Reporting'))
+        self.assertNotEqual(app.normalize_chat_name('Janani 🚚'), app.normalize_chat_name('Janani'))
 
     def test_missing_sidebar_search_does_not_use_message_composer(self):
         driver = Mock()

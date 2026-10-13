@@ -1,6 +1,6 @@
 """
-JANANI FLEET - V78 - FIXED FUEL NOT PUSHING + DEBUG MODE
-- New fuel entry not pushing? V78 shows WHY
+JANANI FLEET - V84 - FUEL REPORTS + BILL IMAGE OCR + DEBUG MODE
+- New fuel entry not pushing? V84 shows WHY
 - Added --force flag to force push even if in history
 - Added detailed fuel debug logging
 - Fixed fuel parsing edge cases
@@ -11,10 +11,11 @@ python janani-webhook.py --days 7 --debug-fuel
 python janani-webhook.py --days 1 --force --debug-fuel
 
 Bills always respect push history, including with --force. Bill dates come from
-the caption or WhatsApp metadata; undated bills and invalid odometers are skipped.
+the caption or WhatsApp metadata; undated bill dates remain blank.
+Images route by OCR to Fuel/Maintanence; ambiguous odometers are skipped.
 """
 
-import os, re, time, requests, json, hashlib, sys, io, platform, base64, tempfile, shutil
+import os, re, time, requests, json, hashlib, sys, io, platform, base64, tempfile, shutil, unicodedata, math
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urlparse
@@ -22,6 +23,17 @@ from urllib.parse import urlparse
 
 class WebhookProtocolError(RuntimeError):
     """The deployment did not return the JSON contract required for uploads."""
+
+
+class ReportBatch(list):
+    """Reports and issues requiring attention after the valid records are sent."""
+    def __init__(self, values=(), issues=()):
+        super().__init__(values)
+        self.scan_issues = list(issues)
+
+
+class ScanCollection(dict):
+    scan_incomplete = False
 
 
 class WebhookPageText(HTMLParser):
@@ -74,9 +86,10 @@ def check_webhook():
     if result.get('success') is False:
         raise WebhookProtocolError('Deployment check failed: ' + str(result.get('error', 'unknown Apps Script error')))
     version = re.match(r'^V(\d+)\b', str(result.get('v', '')))
-    if not version or int(version.group(1)) < 82 or result.get('folderFull') != '09-10-2026':
-        raise WebhookProtocolError('The URL is not serving the complete V82 (or newer) script with full-year date folders. Save Janani.gs, then Deploy > Manage deployments > Edit > New version > Deploy.')
-    print('[CHECK] Webhook ' + str(result['v']) + ': JSON response and date-folder check passed')
+    expected_folders = {'fuel': 'Fuel', 'maintenance': 'Maintanence'}
+    if not version or int(version.group(1)) < 84 or result.get('billFolders') != expected_folders:
+        raise WebhookProtocolError('The URL is not serving V84 (or newer) with fixed Fuel/Maintanence bill folders. Save the complete Janani.gs, then Deploy > Manage deployments > Edit > New version > Deploy.')
+    print('[CHECK] Webhook ' + str(result['v']) + ': JSON response and Fuel/Maintanence routing check passed')
     return result
 
 def detect_windows():
@@ -127,7 +140,7 @@ WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxv1nErWrIV55nPz0NjXjvc71
 HISTORY_FILE = local_path("pushed_history.json")
 MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
-DEFAULT_DAYS = 10
+DEFAULT_DAYS = 15
 DAYS_TO_SCAN = DEFAULT_DAYS
 DEBUG_MODE = "--debug" in sys.argv
 DEBUG_FUEL = "--debug-fuel" in sys.argv
@@ -157,18 +170,36 @@ elif days_from_arg is not None: DAYS_TO_SCAN = days_from_arg
 CONFIG_FILE = local_path("sheet_config.json")
 BROWSER_BINARY = os.environ.get("JANANI_CHROME_BINARY", "")
 DRIVER_PATH = os.environ.get("JANANI_CHROMEDRIVER", "")
+OCR_CONFIG = {}
+WHATSAPP_DATE_ORDER = 'MDY'
 if os.path.exists(CONFIG_FILE):
     try:
         with open(CONFIG_FILE, encoding="utf-8") as stream:
             cfg = json.load(stream)
+        OCR_CONFIG = {key: value for key, value in cfg.items() if key.startswith('bill_ocr_')}
         BROWSER_BINARY = BROWSER_BINARY or cfg.get("chrome_binary", "")
         DRIVER_PATH = DRIVER_PATH or cfg.get("chromedriver_path", "")
+        WHATSAPP_DATE_ORDER = str(cfg.get('whatsapp_date_order', 'MDY')).upper()
         if cfg.get("webhook_url"): WEBHOOK_URL = cfg["webhook_url"]
         if cfg.get("group_name"):
             GROUP_NAME = cfg["group_name"]
             GROUP_ALIASES = [GROUP_NAME] + [g for g in GROUP_ALIASES if g != GROUP_NAME]
         if cfg.get("days"): DAYS_TO_SCAN = int(cfg["days"])
-    except: pass
+    except Exception as error:
+        raise RuntimeError('Could not read sheet_config.json; correct its JSON and settings before syncing: ' + str(error)) from error
+
+# An explicit scheduled command must override saved defaults.
+if group_from_arg:
+    GROUP_NAME = group_from_arg
+    GROUP_ALIASES = [GROUP_NAME] + [g for g in GROUP_ALIASES if g != GROUP_NAME]
+if has_all_flag:
+    DAYS_TO_SCAN = 3650
+elif days_from_arg is not None:
+    DAYS_TO_SCAN = days_from_arg
+if DAYS_TO_SCAN < 1:
+    raise ValueError('--days must be a positive integer')
+if WHATSAPP_DATE_ORDER not in ('DMY', 'MDY'):
+    raise ValueError('whatsapp_date_order must be DMY or MDY')
 
 ALL_KEYS_PATTERN = r"(?:Date|Location|Vehicle\s*no|Present\s*odo|Previous\s*odo|Diesel\s*amount|Diseal\s*amount|Diesel\s*liter|Diseal\s*liter|Average|Bill\s*amount|Work\s*details|Pilot\s*name|Pump\s*Name)\s*-\s*"
 
@@ -200,19 +231,31 @@ def clean_text_for_parsing(text):
     if not text: return text
     return text
 
-def get_field(key, text):
+def get_field(key, text, strict=False):
     cleaned = clean_text_for_parsing(text)
-    aliases = sorted(FIELD_ALIASES.get(key, [key]), key=len, reverse=True)
+    if strict:
+        cleaned = re.sub(r"[*~_\u200e\u200f\u202a-\u202e\u2066-\u2069]", "", cleaned)
+    field_aliases = dict(FIELD_ALIASES, Rate=["Rate/L", "Rate per liter", "Rate per litre", "Rate"]) if strict else FIELD_ALIASES
+    aliases = sorted(field_aliases.get(key, [key]), key=len, reverse=True)
+    next_pattern = ALL_KEYS_PATTERN
+    if strict:
+        next_pattern = r"(?<!\w)(?:" + "|".join(re.escape(alias) for alias in sorted({alias for aliases in field_aliases.values() for alias in aliases}, key=len, reverse=True)) + r")(?!\w)\s*[-:]\s*"
     for alias in aliases:
-        pattern = rf"(?<!\w){re.escape(alias)}(?!\w)\s*[-:]*\s*"
+        if strict:
+            prefix = r"(?:^|\n)[ \t]*" if key == "Total KM" and alias.lower() == "km" else r"(?<!\w)"
+            pattern = prefix + rf"{re.escape(alias)}(?!\w)[ \t]*[-:]?[ \t]*"
+        else:
+            pattern = rf"(?<!\w){re.escape(alias)}(?!\w)\s*[-:]*\s*"
         m = re.search(pattern, cleaned, re.IGNORECASE)
         if m:
             start = m.end()
-            next_m = re.search(ALL_KEYS_PATTERN, cleaned[start:], re.IGNORECASE)
-            if next_m: val = cleaned[start:start+next_m.start()].strip()
+            next_m = re.search(next_pattern, cleaned[start:], re.IGNORECASE)
+            if next_m:
+                val = cleaned[start:start+next_m.start()].strip()
+                if strict: val = val.split("\n")[0].strip()
             else:
                 val = cleaned[start:].strip().split("\n")[0].strip()
-                if key not in ("Present odo", "Previous odo"):
+                if not strict and key not in ("Present odo", "Previous odo"):
                     val = val.split(",")[0].strip()
             if val and val != "-" and val.lower() != "null" and val.lower() != "presentodo" and val.lower() != "fuel":
                 if key == "Location":
@@ -225,6 +268,8 @@ def get_field(key, text):
                 if val.upper() in ["PRESENTODO", "FUEL", "VEHICLE NO", "PUMP NAME"]:
                     continue
                 return val
+    if strict:
+        return ""
     # Fallback: try without dash, like "Present odo: 12345" or "Present odo 12345"
     for alias in aliases:
         pattern = rf"(?<!\w){re.escape(alias)}(?!\w)\s*[:\-]?\s*([A-Za-z0-9\.\s\/]+)"
@@ -238,12 +283,24 @@ def get_field(key, text):
     return ""
 
 def parse_odometer(value):
-    # Read one number, never concatenate a timestamp or the next field's digits.
-    match = re.match(r"\s*(\d{1,3}(?:[,.]\s*\d{3})+|\d{1,2}(?:,\s*\d{2})+,\s*\d{3}|\d+)(?![\d,.])", value)
+    # A second number is ambiguous; reject it rather than inventing a reading.
+    match = re.fullmatch(r"\s*(\d{1,3}(?:[,.]\s*\d{3})+|\d{1,2}(?:,\s*\d{2})+,\s*\d{3}|\d+)\s*(?:km|kms)?\s*", value, re.IGNORECASE)
     if not match:
         return ""
     number = re.sub(r"[,.\s]", "", match.group(1))
     return number if len(number) <= 7 else ""
+
+
+def parse_decimal_field(value, unit=""):
+    """Normalize grouping and an explicit unit without removing other digits/text."""
+    if not value:
+        return ""
+    number = r"(?:\d{1,3}(?:,\s*\d{3})+|\d{1,2}(?:,\s*\d{2})+,\s*\d{3}|\d+)(?:\.\d+)?"
+    prefix = r"(?:₹|Rs\.?|INR)?\s*" if unit == "amount" else ""
+    suffixes = {"amount": r"(?:₹|Rs\.?|INR)?", "liters": r"(?:l|ltr|ltrs|liter|liters|litre|litres)?",
+                "average": r"(?:km\s*/\s*(?:l|ltr|liter|litre))?", "rate": r"(?:rs\.?\s*/\s*(?:l|ltr|liter|litre))?"}
+    match = re.fullmatch(r"\s*" + prefix + "(" + number + r")\s*" + suffixes.get(unit, "") + r"\s*", value, re.IGNORECASE)
+    return re.sub(r"[,\s]", "", match.group(1)) if match else ""
 
 
 def bill_history_keys(entry):
@@ -256,10 +313,29 @@ def bill_history_keys(entry):
         keys.add("bill_" + legacy_hash)
         if entry.get("legacy_image_hash"):
             keys.add("bill_" + entry["legacy_image_hash"])
+    elif entry.get('type') == 'FUEL':
+        keys.add(fuel_content_key(entry))
     return keys
 
 
+def fuel_content_key(entry):
+    fields = ('date', 'vehicle', 'type', 'present_odo', 'previous_odo', 'total_km', 'diesel_amount', 'diesel_liter', 'rate', 'average', 'location', 'pilot', 'pump')
+    content = {field: entry['payload'].get(field, '') for field in fields}
+    identity = hashlib.sha256(entry['unique_key'].encode('utf-8')).hexdigest()[:20]
+    digest = hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
+    return 'fuel_content_' + identity + '_' + digest
+
+
 def already_pushed(entry, history):
+    if not entry.get('has_image') and entry.get('type') == 'FUEL':
+        content_key = fuel_content_key(entry)
+        associated_prefix = content_key.rsplit('_', 1)[0] + '_'
+        if any(key.startswith(associated_prefix) for key in history):
+            # A changed report must reach server conflict checks, not be hidden locally.
+            return content_key in history
+        if entry['unique_key'] in history:
+            print('[HISTORY] Legacy fuel record has no saved amount/liters fingerprint; skipping conservatively. '
+                  'Compare any edited source message with the existing sheet row: ' + entry['unique_key'])
     keys = bill_history_keys(entry)
     if keys & history:
         return True
@@ -271,12 +347,23 @@ def already_pushed(entry, history):
 
 
 def select_entries_to_push(entries, history, force=False):
-    selected, seen = [], set()
+    identities = {}
     for entry in entries:
-        keys = bill_history_keys(entry)
-        if keys & seen:
+        if entry.get('type') == 'FUEL' and not entry.get('has_image'):
+            identities.setdefault(entry['unique_key'], set()).add(fuel_content_key(entry))
+    conflicts = {key for key, values in identities.items() if len(values) > 1}
+    issues = ['Conflicting fuel reports with the same date/vehicle/odometer readings: ' + key for key in sorted(conflicts)]
+    for issue in issues:
+        print('[SKIP] ' + issue + '; correct the source messages before retrying')
+    selected, seen = ReportBatch(issues=issues), set()
+    for entry in entries:
+        if entry.get('type') == 'FUEL' and not entry.get('has_image') and entry['unique_key'] in conflicts:
             continue
-        seen.update(keys)
+        keys = bill_history_keys(entry)
+        identity = {fuel_content_key(entry)} if entry.get('type') == 'FUEL' and not entry.get('has_image') else keys
+        if identity & seen:
+            continue
+        seen.update(identity)
         if already_pushed(entry, history) and (entry.get("has_image") or not force):
             continue
         selected.append(entry)
@@ -383,8 +470,22 @@ def parse_date_strict_ddmmyyyy(date_str):
     now = datetime.now()
     return now.strftime("%d/%m/%y"), now, MONTHS[now.month-1]
 
+
+def parse_report_date(date_str):
+    """Validate non-image reports; never substitute today's date for bad input."""
+    value = date_str.strip().replace('-', '/')
+    if not re.fullmatch(r"\d{1,2}/\d{1,2}/(?:\d{4}|\d{2})", value):
+        raise ValueError('missing or invalid report date')
+    for fmt in ('%d/%m/%Y', '%d/%m/%y'):
+        try:
+            date = datetime.strptime(value, fmt)
+            return date.strftime('%d/%m/%y'), date, MONTHS[date.month - 1]
+        except ValueError:
+            continue
+    raise ValueError('missing or invalid report date')
+
 def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug=False, message_date=""):
-    """V78 with debug reason why fuel not parsed"""
+    """V84 with debug reason why fuel not parsed"""
     check_text = original_text_for_vehicle or text
     if text in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]']:
         check_text = original_text_for_vehicle or ""
@@ -398,34 +499,29 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
             return None, debug_info
     
     cleaned = clean_text_for_parsing(text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text)
-    date_str = get_field("Date", text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text)
+    date_str = get_field("Date", text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text, strict=not bool(image_data))
     # A labelled date may be followed by WhatsApp's time/status text on the same line.
     date_prefix = re.match(r"\s*(\d{1,2}[/\-]\d{1,2}[/\-](?:\d{4}|\d{2}))(?!\d)", date_str)
     if date_prefix:
         date_str = date_prefix.group(1)
     if not date_str:
-        m = re.search(r"^\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", cleaned)
+        pattern = r"^\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})" if image_data else r"^\s*(\d{1,2}[/\-]\d{1,2}[/\-](?:\d{4}|\d{2}))(?!\d)"
+        m = re.search(pattern, cleaned)
         if m: date_str = m.group(1)
     if not date_str:
-        m = re.search(r"(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", check_text)
+        pattern = r"(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})" if image_data else r"(?<!\d)(\d{1,2}[/\-]\d{1,2}[/\-](?:\d{4}|\d{2}))(?!\d)"
+        m = re.search(pattern, check_text)
         if m: date_str = m.group(1)
-        else: date_str = message_date or ("" if image_data else datetime.now().strftime("%d/%m/%y"))
+        else: date_str = message_date or ""
     
-    if image_data:
-        try:
-            normalized_date = date_str.strip().replace("-", "/")
-            date_value = None
-            for fmt in ("%d/%m/%Y", "%d/%m/%y"):
-                try:
-                    date_value = datetime.strptime(normalized_date, fmt)
-                    break
-                except ValueError:
-                    pass
-            if date_value is None:
-                raise ValueError("missing or invalid bill date")
-        except ValueError as exc:
-            return None, [str(exc) + ": bill skipped to avoid the wrong Drive folder"]
-    date_folder, d, month_name = parse_date_strict_ddmmyyyy(date_str)
+    try:
+        if image_data and not date_str:
+            # Classification routes to a fixed folder; never fabricate a date.
+            date_folder, d, month_name = '', None, ''
+        else:
+            date_folder, d, month_name = parse_report_date(date_str)
+    except ValueError:
+        return None, ["Missing or invalid report date; correct the source message before retrying"]
     
     vehicle_text = text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text
     vehicle_raw = extract_vehicle_id(vehicle_text)
@@ -463,11 +559,13 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
     present = prev = total_km = diesel_amt_clean = diesel_ltr_clean = average_val = rate_val = bill_amount = work_details = ""
     
     if msg_type == "FUEL":
-        present_raw = get_field("Present odo", text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text)
-        prev_raw = get_field("Previous odo", text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text)
-        diesel_amt_raw = get_field("Diesel amount", text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text)
-        diesel_ltr_raw = get_field("Diesel liter", text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text)
-        avg_raw = get_field("Average", text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text)
+        present_raw = get_field("Present odo", text, strict=True)
+        prev_raw = get_field("Previous odo", text, strict=True)
+        diesel_amt_raw = get_field("Diesel amount", text, strict=True)
+        diesel_ltr_raw = get_field("Diesel liter", text, strict=True)
+        avg_raw = get_field("Average", text, strict=True)
+        supplied_total = get_field("Total KM", text, strict=True)
+        supplied_rate = get_field("Rate", text, strict=True)
         
         if debug and (not present_raw or not prev_raw):
             debug_info.append(f"Fuel field parse: Present='{present_raw}' Prev='{prev_raw}' DieselAmt='{diesel_amt_raw}' Ltr='{diesel_ltr_raw}' from: {check_text[:150]}")
@@ -476,19 +574,26 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
         prev = parse_odometer(prev_raw)
         if (present_raw and not present) or (prev_raw and not prev):
             return None, ["Invalid odometer reading; correct the source message before retrying"]
+        if not present or not prev:
+            return None, ["Missing present or previous odometer reading; correct the source message"]
         if present and prev and (int(present) < int(prev) or abs(len(present) - len(prev)) > 1):
             return None, [f"Suspicious odometer readings: present={present}, previous={prev}; correct the source message"]
-        diesel_amt_clean = re.sub(r"[^\d.]", "", diesel_amt_raw)[:10]
-        diesel_ltr_clean = re.sub(r"[^\d.]", "", diesel_ltr_raw)[:10]
-        average_val = re.sub(r"[^\d.]", "", avg_raw)[:10]
+        diesel_amt_clean = parse_decimal_field(diesel_amt_raw, "amount")
+        diesel_ltr_clean = parse_decimal_field(diesel_ltr_raw, "liters")
+        average_val = parse_decimal_field(avg_raw, "average")
+        if (not diesel_amt_clean or not diesel_ltr_clean
+                or (avg_raw and not average_val)):
+            return None, ["Missing or invalid diesel amount, liters or average; correct the source message"]
         rate_val = ""
         try:
             if diesel_amt_clean and diesel_ltr_clean:
                 amt = float(diesel_amt_clean)
                 ltr = float(diesel_ltr_clean)
-                if ltr != 0:
-                    rate_val = f"{amt/ltr:.2f}"
-        except: pass
+                if not math.isfinite(amt) or not math.isfinite(ltr) or amt <= 0 or ltr <= 0:
+                    return None, ["Diesel amount and liters must both be positive; correct the source message"]
+                rate_val = f"{amt/ltr:.2f}"
+        except (ValueError, OverflowError):
+            return None, ["Invalid fuel numeric values; correct the source message"]
         
         if not present and not prev and debug:
             debug_info.append(f"Fuel present/prev empty after cleaning: present_raw='{present_raw}' -> '{present}', prev_raw='{prev_raw}' -> '{prev}'")
@@ -496,6 +601,14 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
         try:
             if present and prev: total_km = str(int(present) - int(prev))
         except: pass
+        if supplied_total and parse_odometer(supplied_total) != total_km:
+            return None, ["Total KM does not match the odometer difference; correct the source message"]
+        if avg_raw and abs(float(average_val) - int(total_km) / float(diesel_ltr_clean)) > 0.03:
+            return None, ["Average does not match Total KM / diesel liters; correct the source message"]
+        if supplied_rate:
+            parsed_rate = parse_decimal_field(supplied_rate, "rate")
+            if not parsed_rate or abs(float(parsed_rate) - float(diesel_amt_clean) / float(diesel_ltr_clean)) > 0.02:
+                return None, ["Rate does not match diesel amount / liters; correct the source message"]
     else:
         bill_raw = get_field("Bill amount", text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text)
         if bill_raw:
@@ -558,7 +671,7 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
         "idempotency_key": "bill_" + image_hash_for_payload if image_data else "",
         "file_name": file_name_for_payload,
         "original_date": original_date_for_payload,
-        "date_folder": d.strftime("%d-%m-%Y"),
+        "date_folder": '' if image_data else d.strftime("%d-%m-%Y"),
         "target_sheet": target_sheet
     }
     
@@ -575,6 +688,29 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
 
 def parse_message(text, image_data="", original_text_for_vehicle="", message_date=""):
     result, _ = parse_message_debug(text, image_data, original_text_for_vehicle, debug=False, message_date=message_date)
+    return result
+
+
+def classify_bill_for_upload(entry):
+    """Classify image pixels, independent of caption and numeric report fields."""
+    if not entry.get('has_image'):
+        return None
+    from bill_classifier import classify_bill_image
+    result = classify_bill_image(entry['payload']['image_data'], config=OCR_CONFIG,
+                                 cache_path=local_path('bill_ocr_cache.json'))
+    category = result.get('bill_category')
+    if category not in ('FUEL', 'MAINTENANCE') or result.get('review_required'):
+        raise RuntimeError('Bill OCR needs review: ' + str(result.get('reason', 'classification unavailable')))
+    payload = entry['payload']
+    payload.update(bill_category=category, bill_type=category,
+                   bill_folder='Fuel' if category == 'FUEL' else 'Maintanence',
+                   ocr_status='classified', ocr_reason=result.get('reason', ''),
+                   ocr_engine=result.get('ocr_engine', ''),
+                   ocr_confidence=result.get('confidence', 0),
+                   ocr_classifier_version=result.get('classifier_version', ''),
+                   ocr_review_required=bool(result.get('review_required')))
+    print('[OCR] ' + payload['bill_folder'] + ': ' + str(result.get('reason', ''))
+          + ' (confidence ' + str(result.get('confidence', 0)) + ')')
     return result
 
 def acquire_push_lock():
@@ -650,7 +786,7 @@ def get_chrome_options_universal():
 
 def create_driver_universal():
     print("="*60)
-    print(f"JANANI V78 FIXED FUEL NOT PUSHING - {DAYS_TO_SCAN} Days")
+    print(f"JANANI V84 FUEL REPORTS + BILL IMAGE OCR - {DAYS_TO_SCAN} Days")
     print("Feature: Debug fuel parsing + --force flag")
     print("="*60)
     from selenium import webdriver
@@ -709,8 +845,8 @@ def find_whatsapp_search(driver, timeout=30):
         '[data-testid="chat-list-search"] input, '
         '[contenteditable="true"][data-tab="3"], '
         '[role="search"] [contenteditable="true"], [role="search"] input, '
-        'input[aria-label*="Search"], input[placeholder*="Search"], '
-        '[contenteditable="true"][aria-label*="Search"]')
+        'input[aria-label*="search" i], input[placeholder*="search" i], '
+        '[contenteditable="true"][aria-label*="search" i]')
     for elapsed in range(timeout):
         for box in driver.find_elements(By.CSS_SELECTOR, selector):
             try:
@@ -732,7 +868,9 @@ def find_group(driver, group_name):
     search_box = find_whatsapp_search(driver)
     if search_box is None:
         return False
-    aliases = GROUP_ALIASES if group_name == GROUP_NAME else [group_name] + GROUP_ALIASES
+    # Shorter queries help find long names; they never authorize a different group.
+    aliases = list(dict.fromkeys([group_name] + GROUP_ALIASES))
+    wanted_title = normalize_chat_name(group_name)
     for attempt_name in aliases:
         try:
             print(f"[INFO] Searching for group: {attempt_name}")
@@ -750,32 +888,97 @@ def find_group(driver, group_name):
                 if search_box is None:
                     return False
                 continue
-            elems = driver.find_elements(By.CSS_SELECTOR, '#pane-side [title], #side [role="listitem"] [title], [data-testid="chat-list"] [title], [role="grid"] [title]')
+            elems = driver.find_elements(By.CSS_SELECTOR, '#pane-side [title], #side [role="listitem"] [title], [data-testid="chat-list"] [title], [role="grid"] [title], #side [data-testid="cell-frame-title"], #pane-side [data-testid="cell-frame-title"], '
+                '#pane-side [role="listitem"], #side [role="listitem"], #side [role="button"], '
+                '[data-testid="chat-list"] [data-testid="cell-frame-title"], [data-testid="chat-list"] [role="row"], '
+                '[data-testid="chat-list"] [role="listitem"], [role="grid"] [role="row"]')
             for elem in elems:
                 try:
-                    title = (elem.get_attribute("title") or elem.text or "").strip()
+                    title = chat_element_name(elem)
                     if not elem.is_displayed(): continue
                     if driver.execute_script("return !!arguments[0].closest('#main');", elem): continue
-                    if ' '.join(title.split()).casefold() == ' '.join(attempt_name.split()).casefold():
+                    if normalize_chat_name(title) == wanted_title:
                         try:
                             elem.click()
-                            time.sleep(4)
-                            return True
+                            if confirm_open_group(driver, group_name):
+                                return True
                         except:
                             driver.execute_script("arguments[0].click();", elem)
-                            time.sleep(4)
-                            return True
+                            if confirm_open_group(driver, group_name):
+                                return True
                 except: continue
         except Exception as e:
             print(f"[WARN] Search failed for {attempt_name}: {e}")
             continue
     return False
 
+
+def normalize_chat_name(value):
+    # Directional control marks are presentation only; emoji remain part of the name.
+    value = unicodedata.normalize('NFC', re.sub(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]", "", value))
+    return ' '.join(value.split()).casefold()
+
+
+def chat_element_name(element):
+    for attribute in ('title', 'aria-label'):
+        value = element.get_attribute(attribute)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    text = element.text
+    return text.strip().split('\n', 1)[0].strip() if isinstance(text, str) else ''
+
+
+def confirm_open_group(driver, group_name, timeout=10):
+    wanted = normalize_chat_name(group_name)
+    for _ in range(timeout):
+        for element in driver.find_elements(By.CSS_SELECTOR, '#main header [title], #main header [data-testid="conversation-info-header-chat-title"], #main header [data-testid="conversation-title"], #main header [role="button"]'):
+            try:
+                if element.is_displayed() and normalize_chat_name(chat_element_name(element)) == wanted:
+                    print('[OK] Opened WhatsApp group: ' + group_name)
+                    return True
+            except Exception:
+                continue
+        time.sleep(1)
+    print('[WARN] Clicked a matching chat but its conversation header was not confirmed. No messages will be read from that chat.')
+    return False
+
+
+def move_whatsapp_history(driver, direction='older'):
+    """Scroll the conversation viewport by less than a page to retain overlap."""
+    return driver.execute_script("""
+        const direction = arguments[0];
+        const main = document.querySelector('#main') || document.querySelector('[data-testid="conversation-panel-messages"]');
+        if(!main) return {found: false};
+        let preferred = main.querySelector('[data-testid="conversation-panel-messages"]') || main;
+        let candidates = [];
+        for(let node = preferred; node; node = node.parentElement) {
+            candidates.push(node);
+            if(node === main || node === document.body) break;
+        }
+        candidates.push(...main.querySelectorAll('div'));
+        let scroll = candidates.find(node => {
+            let style = getComputedStyle(node);
+            return node.clientHeight > 0 && node.scrollHeight > node.clientHeight + 1
+                && /auto|scroll/.test(style.overflowY);
+        });
+        if(!scroll) return {found: false};
+        let before = scroll.scrollTop;
+        scroll.scrollTop = direction === 'newest' ? scroll.scrollHeight
+            : Math.max(0, before - Math.max(100, scroll.clientHeight * 0.8));
+        return {found: true, before: before, top: scroll.scrollTop,
+            height: scroll.scrollHeight, viewport: scroll.clientHeight,
+            atTop: scroll.scrollTop <= 1};
+    """, direction)
+
 def scroll_and_collect_with_image_fix(driver, days=30):
     max_scrolls = max(200, days * 12)
     if days >= 3650: max_scrolls = 3000
     print(f"[INFO] Collecting - {days} days, max scrolls {max_scrolls}")
-    collected = {}
+    collected = ScanCollection()
+    empty_passes = 0
+    reached_start = False
+    move_whatsapp_history(driver, 'newest')
+    time.sleep(1)
     
     for i in range(max_scrolls):
         try:
@@ -786,10 +989,18 @@ def scroll_and_collect_with_image_fix(driver, days=30):
                     if(date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return '';
                     return String(day).padStart(2, '0') + '/' + String(month).padStart(2, '0') + '/' + year;
                 }
+                const metadataOrder = arguments[0] || 'MDY';
                 function messageDateText(value) {
                     let text = String(value || '').replace(/[\u200e\u200f]/g, '').trim();
                     let match = text.match(/(?:^|[^\d])(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4}|\d{2})(?!\d)/);
-                    if(match) return calendarDate(Number(match[1]), Number(match[2]), Number(match[3]));
+                    if(match) {
+                        let first = Number(match[1]), second = Number(match[2]), year = Number(match[3]);
+                        let date = metadataOrder === 'MDY' ? calendarDate(second, first, year) : calendarDate(first, second, year);
+                        // An impossible month makes the other interpretation unambiguous.
+                        if(!date && (first > 12 || second > 12))
+                            date = metadataOrder === 'MDY' ? calendarDate(first, second, year) : calendarDate(second, first, year);
+                        return date;
+                    }
                     match = text.match(/(?:^|[^\d])(\d{4})-(\d{2})-(\d{2})(?!\d)/);
                     if(match) return calendarDate(Number(match[3]), Number(match[2]), Number(match[1]));
                     let now = new Date(), lower = text.toLowerCase();
@@ -856,13 +1067,15 @@ def scroll_and_collect_with_image_fix(driver, days=30):
                     'div.copyable-area div[data-id]',
                     'div#main div[data-id]'
                 ];
+                let conversation = document.querySelector('#main') || document.querySelector('[data-testid="conversation-panel-messages"]');
+                if(!conversation) throw new Error('Conversation pane is missing');
                 let nodes = [];
                 for(let sel of selectors){
-                    let found = document.querySelectorAll(sel);
-                    if(found.length > nodes.length) nodes = found;
+                    let found = conversation.querySelectorAll(sel);
+                    if(found.length) { nodes = found; break; }
                 }
                 if(nodes.length == 0){
-                    let allDivs = document.querySelectorAll('div');
+                    let allDivs = conversation.querySelectorAll('div');
                     for(let div of allDivs){
                         let txt = div.innerText || '';
                         if(txt.length > 20 && txt.length < 1000){
@@ -880,7 +1093,11 @@ def scroll_and_collect_with_image_fix(driver, days=30):
                 }
                 nodes.forEach((n, idx)=>{
                     let text = '';
-                    try{ text = n.innerText || n.textContent || ''; }catch(e){ text = ''; }
+                    try{
+                        let ownText = n.querySelector('img, [data-testid="image-thumb"]') ? [] : Array.from(n.querySelectorAll('span.selectable-text.copyable-text, [data-testid="msg-text"]')).filter(item => !item.closest('[data-testid*="quoted"]'));
+                        // The container includes replied-to text and time/status labels.
+                        text = ownText.length ? ownText.map(item => item.innerText || item.textContent || '').join('\n') : n.innerText || n.textContent || '';
+                    }catch(e){ text = ''; }
                     text = text.trim();
                     if(text.length > 3000 || (text.length < 10 && !n.querySelector('img'))) return;
                     let tl = text.toLowerCase();
@@ -906,7 +1123,7 @@ def scroll_and_collect_with_image_fix(driver, days=30):
                     result.push({messageId: messageId, messageDate: messageDate, idx: idx, text: text || (isForwarded ? '[FORWARDED_BILL_IMAGE]' : '[IMAGE_ONLY_BILL]'), hasImage: hasImage, imgCount: imgCount, isForwarded: isForwarded, textLength: text.length});
                 });
                 return result;
-            """)
+            """, WHATSAPP_DATE_ORDER)
             
             found_in_this_scroll = 0
             if messages:
@@ -995,28 +1212,16 @@ def scroll_and_collect_with_image_fix(driver, days=30):
                                     b64 = b64.get("image_data", "")
                                 if b64: image_data = b64
                             except: pass
-                        collected[h] = {"text": txt, "image_data": image_data, "message_date": msg.get("messageDate", ""), "message_id": msg.get("messageId", ""), "legacy_image_hash": legacy_image_hash}
+                        collected[h] = {"text": txt, "image_data": image_data, "has_image": has_img, "message_date": msg.get("messageDate", ""), "message_id": msg.get("messageId", ""), "legacy_image_hash": legacy_image_hash}
                         found_in_this_scroll += 1
             
             print(f"  Scroll {i}: Found {found_in_this_scroll} new messages (total {len(collected)})")
-            
-            try:
-                driver.execute_script("""
-                    const scrollSelectors = ['div[data-testid="conversation-panel-messages"]','div#main','div[data-testid="chat"]','div._1c_mC','div.copyable-area'];
-                    for(let sel of scrollSelectors){
-                        let el = document.querySelector(sel);
-                        if(el){ el.scrollTop = 0; return; }
-                    }
-                    window.scrollTo(0,0);
-                """)
-                time.sleep(2.5 if IS_WIN8_FAMILY else 1.5)
-            except:
-                try:
-                    driver.find_element(By.TAG_NAME, "body").send_keys(Keys.PAGE_UP)
-                    time.sleep(1)
-                except: pass
-            
-            if i > 5 and found_in_this_scroll == 0 and len(collected) > 10:
+
+            progress = move_whatsapp_history(driver)
+            time.sleep(2.5 if IS_WIN8_FAMILY else 1.5)
+            empty_passes = empty_passes + 1 if found_in_this_scroll == 0 else 0
+            if empty_passes >= 4 and (not progress.get('found') or progress.get('atTop')):
+                reached_start = True
                 break
                 
         except Exception as e:
@@ -1024,6 +1229,10 @@ def scroll_and_collect_with_image_fix(driver, days=30):
             time.sleep(1)
             continue
     
+    if not reached_start:
+        collected.scan_incomplete = True
+        print('[WARN] History scan reached its limit before confirming the beginning of the conversation. '
+              'Older messages may remain; increase --days or use --all for an intentional history scan.')
     print(f"[INFO] Collected {len(collected)} messages")
     return collected
 
@@ -1031,8 +1240,8 @@ def read_last_n_days(days=30):
     if not SELENIUM_AVAILABLE:
         print("[ERROR] Selenium not installed")
         return [], set()
-    print(f"Platform: {platform.platform()} | Scanning {days} days - V78")
-    cutoff_date = datetime.now() - timedelta(days=days) if days < 3650 else datetime(2000, 1, 1)
+    print(f"Platform: {platform.platform()} | Scanning {days} days - V84")
+    cutoff_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1) if days < 3650 else datetime(2000, 1, 1)
     print(f"[INFO] Cutoff: {cutoff_date.strftime('%d/%m/%y')}")
     try:
         driver = create_driver_universal()
@@ -1056,19 +1265,36 @@ def read_last_n_days(days=30):
         collected_dict = scroll_and_collect_with_image_fix(driver, days=days)
         history = load_history()
         parsed = []
+        scan_issues = ['WhatsApp history scan ended at its configured limit before confirming the conversation boundary'] if getattr(collected_dict, 'scan_incomplete', False) else []
         skipped_debug = []
         
         for h, item in collected_dict.items():
             txt = item["text"].strip()
             img_data = item.get("image_data", "")
+            if item.get('has_image') and not img_data:
+                issue = 'Bill image could not be downloaded from WhatsApp; retry after it loads: ' + str(item.get('message_id') or h)
+                print('[SKIP] ' + issue)
+                scan_issues.append(issue)
+                continue
             if not txt and not img_data: continue
             if len(txt) < 3 and not img_data: continue
             
             result, debug_info = parse_message_debug(txt, image_data=img_data, original_text_for_vehicle=txt, debug=DEBUG_FUEL, message_date=item.get("message_date", ""))
             if result:
                 result["message_id"] = item.get("message_id", "")
+                if not result.get('has_image'):
+                    result['payload']['message_id'] = item.get('message_id', '')
                 result["legacy_image_hash"] = item.get("legacy_image_hash", "")
-                if result.get('date_obj') and result['date_obj'] < cutoff_date and not result.get('has_image'):
+                filter_date = result.get('date_obj')
+                if result.get('type') == 'FUEL' or result.get('has_image'):
+                    try:
+                        received_date = parse_report_date(item.get('message_date', ''))[1]
+                        filter_date = received_date if result.get('has_image') else max(filter_date, received_date)
+                    except ValueError:
+                        if result.get('has_image'):
+                            print('[REVIEW] Bill received-date metadata unavailable; using a caption date when present, otherwise leaving Date blank.')
+                        pass
+                if filter_date and filter_date < cutoff_date:
                     if DEBUG_FUEL and result.get('type') == 'FUEL':
                         print(f"  [FILTERED BY DATE] Fuel {result['payload']['vehicle']} {result['date_folder']} < cutoff {cutoff_date.strftime('%d/%m/%y')}")
                     continue
@@ -1076,6 +1302,8 @@ def read_last_n_days(days=30):
             else:
                 if debug_info:
                     print("[SKIP] " + "; ".join(debug_info))
+                    if not img_data and any(word in txt.lower() for word in ('odo', 'diesel', 'diseal')):
+                        scan_issues.append('Skipped fuel report: ' + '; '.join(debug_info))
                 if DEBUG_FUEL and debug_info:
                     # Only show fuel-related debug
                     if "odo" in txt.lower() or "diesel" in txt.lower() or "present" in txt.lower():
@@ -1092,17 +1320,17 @@ def read_last_n_days(days=30):
         parsed.sort(key=lambda x: x.get('date_obj') or datetime.min, reverse=True)
         fuel = sum(1 for e in parsed if e.get('type') == 'FUEL')
         maint = sum(1 for e in parsed if e.get('type') == 'MAINTENANCE')
-        print(f"[INFO] V78 - Fuel: {fuel}, Bills: {maint}, History: {len(history)}")
+        print(f"[INFO] V84 - Fuel: {fuel}, Bills: {maint}, History: {len(history)}")
         
         deduped = {}
         for entry in parsed:
-            key = entry["unique_key"]
+            key = fuel_content_key(entry) if entry.get('type') == 'FUEL' and not entry.get('has_image') else entry["unique_key"]
             if key not in deduped:
                 deduped[key] = entry
         parsed = list(deduped.values())
         parsed.sort(key=lambda x: x.get('date_obj') or datetime.min, reverse=True)
         driver.quit()
-        return parsed, history
+        return ReportBatch(parsed, issues=scan_issues), history
     except Exception as e:
         print(f"[ERROR] {e}")
         import traceback
@@ -1120,7 +1348,7 @@ if __name__ == "__main__":
     if '--check-webhook' in sys.argv:
         sys.exit(0)
     print("="*60)
-    print(f"JANANI V78 FIXED FUEL NOT PUSHING - {DAYS_TO_SCAN} Days")
+    print(f"JANANI V84 FUEL REPORTS + BILL IMAGE OCR - {DAYS_TO_SCAN} Days")
     print(f"Force: {FORCE_PUSH} | Debug Fuel: {DEBUG_FUEL}")
     print("="*60)
     push_lock = acquire_push_lock()
@@ -1137,7 +1365,7 @@ if __name__ == "__main__":
         print(f"\nFuel entries found: {len(fuel_entries)}")
         for e in fuel_entries[:10]:
             p = e['payload']
-            in_hist = "IN HISTORY (will skip unless --force)" if e['unique_key'] in history else "NEW"
+            in_hist = "IN HISTORY (will skip unless --force)" if already_pushed(e, history) else "NEW"
             print(f"  {e['date_folder']} ⛽ {p['vehicle']} | Present:{p['present_odo']} Prev:{p['previous_odo']} | {p['diesel_amount']}L | {in_hist} | key={e['unique_key'][:40]}")
         
         if FORCE_PUSH:
@@ -1167,11 +1395,19 @@ if __name__ == "__main__":
             print(f"[{idx+1}/{len(push_list)}] {has_img} {payload['vehicle']} {payload['date']} {payload['type']} | {size:.1f}KB -> {target}")
             
             try:
+                if payload.get('has_image'):
+                    classify_bill_for_upload(e)
                 attempted_pushes += 1
                 r = requests.post(WEBHOOK_URL, json=payload, timeout=90)
                 j = webhook_json(r)
                 print(f"  -> {json.dumps(j, ensure_ascii=False)[:800]}")
                 if j.get("success") is True or j.get("duplicate") is True:
+                    if payload.get('has_image') and (not all(j.get(field) for field in ('driveLink', 'fileId', 'folderId'))
+                            or j.get('billFolder') != payload.get('bill_folder')
+                            or j.get('billCategory') != payload.get('bill_category')):
+                        failed_pushes += 1
+                        print('  -> [FAIL] Bill response did not confirm its Drive URL and classified folder; history not updated')
+                        continue
                     history.update(bill_history_keys(e))
                     save_history(history)
                     confirmed_pushes += 1
@@ -1193,6 +1429,9 @@ if __name__ == "__main__":
                 print(f"  Push failed: {ex}")
         
         print(f'\n[RESULT] Confirmed: {confirmed_pushes}; failed: {failed_pushes}; not attempted: {len(push_list) - attempted_pushes}')
-        if failed_pushes:
+        scan_issues = getattr(entries, 'scan_issues', []) + getattr(push_list, 'scan_issues', [])
+        for issue in scan_issues:
+            print('[REVIEW] ' + issue)
+        if failed_pushes or scan_issues:
             sys.exit(1)
         print("[DONE] Janani sync")

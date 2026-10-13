@@ -1,3 +1,5 @@
+Use the complete [Janani V84 bundle](Janani.gs) and [deployment instructions](DEPLOY_COMPLETE.md) for the current Python. Bills now route by Hindi/English image OCR to fixed Fuel/Maintanence folders; the older modular fuel notes below explain the header-mapping compatibility only. See [BILL_FOLDERS.md](BILL_FOLDERS.md).
+
 Use [the complete single-file script](Janani.gs) with [full replacement instructions](DEPLOY_COMPLETE.md) if you want all fixes together. The modular installation below remains available for an existing project.
 
 # Fix the deployed V79 fuel-column mapping

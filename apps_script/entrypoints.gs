@@ -1,11 +1,14 @@
 /**
- * JANANI FLEET V82 - complete web-app entry points.
+ * JANANI FLEET V84 - complete web-app entry points.
  * Use the generated Janani.gs as the single-file deployment.
  */
 var SHEET_ID = '1ii9MU_bScuYAqtuXGQyKd4QLsgHcwwJJLcfusoo5NWI';
 var BILL_IMAGES_FOLDER_ID = '1fGcvEMxynl9MNsADvpqFQEf1elDbrFgH';
 var BILL_LOG_SHEET_NAME = 'Bill log';
-var JANANI_VERSION = 'V82';
+// Optional existing folder IDs. Empty values create/reuse named children of Bills.
+var BILL_FUEL_FOLDER_ID = '';
+var BILL_MAINTENANCE_FOLDER_ID = '';
+var JANANI_VERSION = 'V84';
 var JANANI_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 var FUEL_HEADERS_OLD = ['Date', 'Location', 'Vehicle', 'Type', 'Present ODO', 'Previous ODO',
   'Total KM', 'Diesel Amount', 'Diesel Liter', 'Rate', 'Average', 'Bill Amount',
@@ -190,7 +193,7 @@ function doGet(e) {
       var parsed = parseDate(params.date);
       return jsonResponseWithCallback({success: true, v: JANANI_VERSION, folder: parsed.folder,
         folderDashed: parsed.folderFull, folderFull: parsed.folderFull, sheet: BILL_LOG_SHEET_NAME,
-        fuelHeaders: FUEL_HEADERS_OLD}, params);
+        fuelHeaders: FUEL_HEADERS_OLD, billFolders: {fuel: 'Fuel', maintenance: 'Maintanence'}}, params);
     }
     if (action === 'fix_headers') {
       return jsonResponseWithCallback({success: false, v: JANANI_VERSION,

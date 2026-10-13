@@ -1,6 +1,6 @@
 # Running Janani on Windows
 
-Windows 10/11 (and comparable Windows Server versions) are the recommended targets. Install a supported Python 3 release and Google Chrome, then run `setup_windows.bat` once and `run_windows.bat --days 2` to sync. Scan the WhatsApp QR code on the first run. Only run syncing when you intend to post records to the configured Google Sheets webhook.
+Windows 10/11 (and comparable Windows Server versions) are the recommended targets. Install a supported Python 3 release and Google Chrome, install packages with `py -3 -m pip install -r requirements.txt`, then run `run_daily.bat` to sync. Scan the WhatsApp QR code on the first run. Only run syncing when you intend to post records to the configured Google Sheets webhook.
 
 The launchers handle installation paths with spaces and switch to the script directory, including when invoked from Task Scheduler. Configuration, push history, the sync lock, and the WhatsApp profile are located beside `janani-webhook.py`, independent of the caller's working directory. Keep that directory writable. Preserve `pushed_history.json` and the WhatsApp profile to retain duplicate protection and login state. Close any other Chrome instance using that profile before running; profile lock files are never forcibly deleted.
 
@@ -21,7 +21,7 @@ Run regression tests using `.venv\Scripts\python.exe -m unittest discover -s tes
 
 ## Daily scheduling
 
-Keep `run_daily.bat` beside `janani-webhook.py`. Run `setup_windows.bat` once, then run `run_daily.bat` manually and complete the WhatsApp QR login. The batch file scans the last two days, appends Python output and timestamps to `daily_log.txt`, and returns Python's exit code. Keep push history intact and do not add `--force` to the daily schedule. The Python exit code alone does not confirm successful uploads; inspect the log for login, collection, and webhook results.
+Keep `run_daily.bat` beside `janani-webhook.py`. Install `requirements.txt` and Hindi/English Tesseract (see [BILL_OCR.md](BILL_OCR.md)), then run `run_daily.bat` manually and complete the WhatsApp QR login. The batch file uses an existing `.venv`, the Python launcher, or Python on PATH; it scans the last 15 days with debug enabled, appends Python output and timestamps to `daily_log.txt`, and returns Python's exit code. Keep push history intact and do not add `--force` to the daily schedule. The Python exit code alone does not confirm successful uploads; inspect the log for login, collection, and webhook results.
 
 In Windows Task Scheduler, create a task with these settings (replace `C:\Janani` with your actual folder):
 

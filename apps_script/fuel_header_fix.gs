@@ -51,6 +51,22 @@ function fuelString_(value) {
   return value === null || value === undefined ? '' : String(value).trim();
 }
 
+function fuelComparableV83_(value, field) {
+  var text = fuelString_(value);
+  if (['present_odo', 'previous_odo', 'total_km', 'diesel_amount', 'diesel_liter', 'rate', 'average'].indexOf(field) >= 0 && /^\d+(?:\.\d+)?$/.test(text)) {
+    return String(Number(text));
+  }
+  return text;
+}
+
+function fuelRowConflictV83_(row, indexes, values) {
+  var fields = ['location', 'total_km', 'diesel_amount', 'diesel_liter', 'rate', 'average', 'pilot', 'pump'];
+  return fields.some(function(field) {
+    if (indexes[field] === undefined) return false;
+    return fuelComparableV83_(row[indexes[field]], field) !== fuelComparableV83_(values[field], field);
+  });
+}
+
 function writeFuelReportV80_(data, targetSheet, monthName, dateForSheet, date, ss, params) {
   var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   var monthSheetName = months.indexOf(targetSheet) >= 0 ? targetSheet : monthName;
@@ -75,6 +91,11 @@ function writeFuelReportV80_(data, targetSheet, monthName, dateForSheet, date, s
         throw new Error('Missing recognized ' + field + ' column in ' + monthSheetName + '; no row written.');
       }
     });
+    var reportType = fuelString_(data.type || 'FUEL').toUpperCase();
+    var businessColumns = reportType === 'FUEL' ? ['diesel_amount', 'diesel_liter', 'total_km'] : [];
+    businessColumns.forEach(function(field) {
+      if (indexes[field] === undefined) throw new Error('Missing recognized ' + field + ' column in ' + monthSheetName + '; no row written.');
+    });
 
     var values = {
       date: dateForSheet, location: fuelString_(data.location), vehicle: vehicle,
@@ -96,17 +117,40 @@ function writeFuelReportV80_(data, targetSheet, monthName, dateForSheet, date, s
     }
 
     var allRows = sheet.getDataRange().getValues();
-    if (values.present_odo) {
-      for (var i = 1; i < allRows.length; i++) {
-        var row = allRows[i];
-        if (fuelDateKey_(row[indexes.date]) === fuelDateKey_(date) &&
-            fuelString_(row[indexes.vehicle]).toUpperCase() === vehicle &&
-            fuelString_(row[indexes.type]).toUpperCase() === values.type &&
+    var notes = values.type === 'FUEL' ? sheet.getDataRange().getNotes() : [];
+    var messageId = values.type === 'FUEL' ? fuelString_(data.message_id) : '';
+    if (messageId.length > 1024 || /[\r\n\x00-\x1f]/.test(messageId)) throw new Error('Invalid WhatsApp message ID; no row written.');
+    for (var i = 1; i < allRows.length; i++) {
+      var row = allRows[i];
+      var sameReport = fuelDateKey_(row[indexes.date]) === fuelDateKey_(date) &&
+        fuelString_(row[indexes.vehicle]).toUpperCase() === vehicle &&
+        fuelString_(row[indexes.type]).toUpperCase() === values.type;
+      if (values.type !== 'FUEL') {
+        // Preserve the existing maintenance/text behavior: deduplicate only
+        // reports with a present odometer using the original identity fields.
+        if (values.present_odo && sameReport &&
             fuelString_(row[indexes.present_odo]) === values.present_odo &&
             fuelString_(row[indexes.previous_odo]) === values.previous_odo) {
           return jsonResponseWithCallback({success: true, status: 'duplicate', sheet: monthSheetName,
             duplicate: true, vehicle: vehicle, existingRow: i + 1, v: 'V80 vehicle headers'}, params);
         }
+        continue;
+      }
+      var sameOdometers = fuelComparableV83_(row[indexes.present_odo], 'present_odo') === fuelComparableV83_(values.present_odo, 'present_odo') &&
+        fuelComparableV83_(row[indexes.previous_odo], 'previous_odo') === fuelComparableV83_(values.previous_odo, 'previous_odo');
+      var note = notes[i] ? String(notes[i][indexes.date] || '') : '';
+      var sameMessage = messageId && note.split('\n').indexOf('Janani Message ID: ' + messageId) >= 0;
+      var conflict = fuelRowConflictV83_(row, indexes, values);
+      if (sameMessage && (!sameReport || !sameOdometers || conflict)) {
+        throw new Error('WhatsApp message differs from its existing sheet row ' + (i + 1) + '; review the source correction before retrying.');
+      }
+      var fuelIdentity = values.present_odo && sameReport && sameOdometers;
+      if (fuelIdentity && conflict) {
+        throw new Error('Fuel values differ from existing row ' + (i + 1) + ' for the same vehicle/date/odometers; review before retrying.');
+      }
+      if (sameMessage || fuelIdentity) {
+        return jsonResponseWithCallback({success: true, status: 'duplicate', sheet: monthSheetName,
+          duplicate: true, vehicle: vehicle, existingRow: i + 1, v: 'V83 unique reports'}, params);
       }
     }
 
@@ -120,6 +164,7 @@ function writeFuelReportV80_(data, targetSheet, monthName, dateForSheet, date, s
       sheet.getRange(nextRow, indexes[field] + 1).setNumberFormat('@');
     });
     sheet.appendRow(rowData);
+    if (messageId) sheet.getRange(nextRow, indexes.date + 1).setNote('Janani Message ID: ' + messageId);
     SpreadsheetApp.flush();
     return jsonResponseWithCallback({success: true, status: 'inserted', sheet: monthSheetName,
       date: date, vehicle: vehicle, type: values.type, present_odo: values.present_odo,

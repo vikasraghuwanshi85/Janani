@@ -22,7 +22,7 @@ assert.equal(pythonResult.status, 0, pythonResult.stderr || 'Activate the projec
 const payload = JSON.parse(pythonResult.stdout);
 
 function fixture(headers = octoberHeaders, existingRows = [], options = {}) {
-  const state = { rows: [headers.slice(), ...existingRows], formatting: [], waits: [], released: 0, flushes: 0, created: 0 };
+  const state = { rows: [headers.slice(), ...existingRows], notes: [], formatting: [], waits: [], released: 0, flushes: 0, created: 0 };
   const sheet = {
     getLastColumn: () => state.rows[0].length,
     getLastRow: () => state.rows.length,
@@ -30,10 +30,11 @@ function fixture(headers = octoberHeaders, existingRows = [], options = {}) {
       return {
         getValues: () => [state.rows[row - 1]],
         setNumberFormat(format) { state.formatting.push({ row, column, format }); return this; },
+        setNote(note) {state.notes[row - 1] ||= []; state.notes[row - 1][column - 1] = note;},
         setFontWeight() { return this; }, setBackground() { return this; }, setFontColor() { return this; }
       };
     },
-    getDataRange: () => ({ getValues: () => state.rows }),
+    getDataRange: () => ({ getValues: () => state.rows, getNotes: () => state.notes }),
     appendRow(row) {
       if (options.appendError) throw new Error('append failed');
       state.rows.push(Array.from(row));
