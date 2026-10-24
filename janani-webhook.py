@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
-PYTHON_BUILD = '2026-10-24.2'
+PYTHON_BUILD = '2026-10-24.3'
 
 class WebhookProtocolError(RuntimeError):
     """The deployment did not return the JSON contract required for uploads."""
@@ -523,6 +523,35 @@ def parse_report_date(date_str):
         except ValueError:
             continue
     raise ValueError('missing or invalid report date')
+
+
+def message_scan_date(item):
+    """Find a trustworthy window date without validating a report's numbers."""
+    received_date = None
+    try:
+        received_date = parse_report_date(item.get('message_date', ''))[1]
+    except (ValueError, TypeError, AttributeError):
+        pass
+    has_image = bool(item.get('has_image') or item.get('image_data'))
+    if has_image and received_date is not None:
+        return received_date
+
+    text = item.get('text', '')
+    report_date = None
+    if isinstance(text, str):
+        date_text = get_field('Date', text, strict=not has_image)
+        prefix = re.match(r"\s*(\d{1,2}[/\-]\d{1,2}[/\-](?:\d{4}|\d{2}))(?!\d)", date_text)
+        if prefix:
+            date_text = prefix.group(1)
+        if not date_text:
+            match = re.search(r"(?<!\d)(\d{1,2}[/\-]\d{1,2}[/\-](?:\d{4}|\d{2}))(?!\d)", text)
+            date_text = match.group(1) if match else ''
+        try:
+            report_date = parse_report_date(date_text)[1]
+        except (ValueError, TypeError, AttributeError):
+            pass
+    dates = [date for date in (received_date, report_date) if date is not None]
+    return max(dates) if dates else None
 
 def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug=False, message_date=""):
     """V84 with debug reason why fuel not parsed"""
@@ -1056,7 +1085,7 @@ def scroll_and_collect_with_image_fix(driver, days=30):
     exhausted_images = set()
     previous_batch_latest = None
     moved_older = False
-    cutoff_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days)
+    cutoff_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
     try:
         move_whatsapp_history(driver, 'newest')
     except Exception as error:
@@ -1370,6 +1399,17 @@ def scroll_and_collect_with_image_fix(driver, days=30):
     print(f"[INFO] Collected {len(collected)} messages")
     return collected
 
+def message_reference(item, fallback_id=''):
+    """Locate a rejected source without copying its entire message into the log."""
+    text = item.get('text', '')
+    date = get_field('Date', text, strict=True) or item.get('message_date') or '-'
+    vehicle = extract_vehicle_id(text) or '-'
+    identity = item.get('message_id') or fallback_id or '-'
+    def one_line(value, limit):
+        return ' '.join(str(value).split())[:limit]
+    return 'date=' + one_line(date, 24) + ', vehicle=' + one_line(vehicle, 24) + ', message=' + one_line(identity, 160)
+
+
 def read_last_n_days(days=30):
     if not SELENIUM_AVAILABLE:
         print("[ERROR] Selenium not installed")
@@ -1405,8 +1445,14 @@ def read_last_n_days(days=30):
         for h, item in collected_dict.items():
             txt = item["text"].strip()
             img_data = item.get("image_data", "")
+            if days < 3650:
+                window_date = message_scan_date(item)
+                if window_date is not None and window_date < cutoff_date:
+                    if DEBUG_FUEL:
+                        print(f'  [FILTERED BY DATE] WhatsApp report {item.get("message_id") or h}: {window_date.strftime("%d/%m/%y")} < cutoff {cutoff_date.strftime("%d/%m/%y")}')
+                    continue
             if item.get('has_image') and not img_data:
-                issue = 'Bill image could not be downloaded from WhatsApp; retry after it loads: ' + str(item.get('message_id') or h)
+                issue = 'Bill image could not be downloaded from WhatsApp; retry after it loads: ' + message_reference(item, h)
                 print('[SKIP] ' + issue)
                 scan_issues.append(issue)
                 continue
@@ -1435,9 +1481,10 @@ def read_last_n_days(days=30):
                 parsed.append(result)
             else:
                 if debug_info:
-                    print("[SKIP] " + "; ".join(debug_info))
+                    reference = message_reference(item, h)
+                    print('[SKIP] ' + reference + ': ' + '; '.join(debug_info))
                     if not img_data and any(word in txt.lower() for word in ('odo', 'diesel', 'diseal')):
-                        scan_issues.append('Skipped fuel report: ' + '; '.join(debug_info))
+                        scan_issues.append('Skipped fuel report [' + reference + ']: ' + '; '.join(debug_info))
                 if DEBUG_FUEL and debug_info:
                     # Only show fuel-related debug
                     if "odo" in txt.lower() or "diesel" in txt.lower() or "present" in txt.lower():
@@ -1530,19 +1577,25 @@ if __name__ == "__main__":
         push_list = to_push
         confirmed_pushes = 0
         failed_pushes = 0
-        attempted_pushes = 0
+        held_for_ocr = 0
+        processed_pushes = 0
         
         for idx, e in enumerate(push_list):
+            processed_pushes += 1
             payload = e['payload']
             has_img = "📷 BILL" if payload.get('has_image') else "⛽ FUEL"
             size = len(payload.get('image_data',''))/1024 if payload.get('image_data') else 0
             target = payload.get('target_sheet', 'unknown')
             print(f"[{idx+1}/{len(push_list)}] {has_img} {payload['vehicle']} {payload['date']} {payload['type']} | {size:.1f}KB -> {target}")
             
-            try:
-                if payload.get('has_image'):
+            if payload.get('has_image'):
+                try:
                     classify_bill_for_upload(e)
-                attempted_pushes += 1
+                except Exception as ex:
+                    held_for_ocr += 1
+                    print(f"  -> [HOLD OCR] {payload['vehicle']} {payload['date']}: {ex}; image was not sent and history was not updated")
+                    continue
+            try:
                 r = requests.post(WEBHOOK_URL, json=payload, timeout=90)
                 j = webhook_json(r)
                 print(f"  -> {json.dumps(j, ensure_ascii=False)[:800]}")
@@ -1573,10 +1626,10 @@ if __name__ == "__main__":
                 failed_pushes += 1
                 print(f"  Push failed: {ex}")
         
-        print(f'\n[RESULT] Confirmed: {confirmed_pushes}; failed: {failed_pushes}; not attempted: {len(push_list) - attempted_pushes}')
+        print(f'\n[RESULT] Confirmed: {confirmed_pushes}; upload unconfirmed: {failed_pushes}; held for OCR: {held_for_ocr}; not processed: {len(push_list) - processed_pushes}')
         scan_issues = getattr(entries, 'scan_issues', []) + getattr(push_list, 'scan_issues', [])
         for issue in scan_issues:
             print('[REVIEW] ' + issue)
-        if failed_pushes or scan_issues:
+        if failed_pushes or held_for_ocr or scan_issues:
             sys.exit(1)
         print("[DONE] Janani sync")
