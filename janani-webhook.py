@@ -33,7 +33,43 @@ class ReportBatch(list):
 
 
 class ScanCollection(dict):
-    scan_incomplete = False
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scan_incomplete = False
+        self.scan_issues = []
+
+
+def browser_session_lost(error):
+    """Recognize a closed/crashed session, rather than retrying its dead ID."""
+    if type(error).__name__ in ('InvalidSessionIdException', 'NoSuchWindowException'):
+        return True
+    message = str(getattr(error, 'msg', '') or error).casefold()
+    return any(marker in message for marker in (
+        'invalid session id', 'session deleted', 'not connected to devtools',
+        'unable to receive message from renderer', 'tab crashed',
+        'chrome not reachable', 'disconnected:', 'target window already closed',
+        'no such window', 'web view not found'))
+
+
+def short_browser_error(error):
+    message = str(getattr(error, 'msg', '') or error).strip().splitlines()
+    return (message[0] if message else type(error).__name__)[:240]
+
+
+def stop_whatsapp_scan(collected, reason):
+    collected.scan_incomplete = True
+    if reason not in collected.scan_issues:
+        collected.scan_issues.append(reason)
+    print('[WARN] ' + reason)
+    print(f'[INFO] Keeping {len(collected)} collected messages; the scan is incomplete and must be retried.')
+
+
+def close_whatsapp_driver(driver):
+    # Losing Chrome during cleanup must not discard already collected reports.
+    try:
+        driver.quit()
+    except Exception as error:
+        print('[WARN] Chrome cleanup failed; collected reports are retained: ' + short_browser_error(error))
 
 
 class WebhookPageText(HTMLParser):
@@ -977,8 +1013,19 @@ def scroll_and_collect_with_image_fix(driver, days=30):
     collected = ScanCollection()
     empty_passes = 0
     reached_start = False
-    move_whatsapp_history(driver, 'newest')
+    image_attempts = {}
+    max_image_attempts = 3
+    exhausted_images = set()
+    previous_batch_latest = None
+    moved_older = False
+    cutoff_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days)
+    try:
+        move_whatsapp_history(driver, 'newest')
+    except Exception as error:
+        stop_whatsapp_scan(collected, 'Could not position WhatsApp history: ' + short_browser_error(error))
+        return collected
     time.sleep(1)
+    consecutive_errors = 0
     
     for i in range(max_scrolls):
         try:
@@ -1126,6 +1173,7 @@ def scroll_and_collect_with_image_fix(driver, days=30):
             """, WHATSAPP_DATE_ORDER)
             
             found_in_this_scroll = 0
+            images_loaded_in_scroll = 0
             if messages:
                 for msg in messages:
                     if not isinstance(msg, dict): continue
@@ -1135,10 +1183,13 @@ def scroll_and_collect_with_image_fix(driver, days=30):
                     h = msg.get("messageId") or hashlib.sha256((txt + msg.get("messageDate", "")).encode("utf-8")).hexdigest()
                     if h in collected and not collected[h].get("message_date") and msg.get("messageDate"):
                         collected[h]["message_date"] = msg["messageDate"]
-                    if h not in collected or (has_img and not collected[h].get("image_data")):
+                    is_new_message = h not in collected
+                    retry_image = has_img and not collected.get(h, {}).get('image_data') and image_attempts.get(h, 0) < max_image_attempts
+                    if is_new_message or retry_image:
                         image_data = ""
                         legacy_image_hash = ""
                         if has_img:
+                            image_attempts[h] = image_attempts.get(h, 0) + 1
                             try:
                                 b64 = driver.execute_async_script("""
                                     const callback = arguments[arguments.length - 1];
@@ -1211,28 +1262,73 @@ def scroll_and_collect_with_image_fix(driver, days=30):
                                         legacy_image_hash = hashlib.md5(legacy_data.encode("utf-8")).hexdigest()[:20]
                                     b64 = b64.get("image_data", "")
                                 if b64: image_data = b64
-                            except: pass
+                            except Exception as error:
+                                if browser_session_lost(error):
+                                    raise
                         collected[h] = {"text": txt, "image_data": image_data, "has_image": has_img, "message_date": msg.get("messageDate", ""), "message_id": msg.get("messageId", ""), "legacy_image_hash": legacy_image_hash}
-                        found_in_this_scroll += 1
+                        if is_new_message:
+                            found_in_this_scroll += 1
+                        if image_data:
+                            images_loaded_in_scroll += 1
+                        elif has_img and image_attempts[h] >= max_image_attempts and h not in exhausted_images:
+                            exhausted_images.add(h)
+                            print(f'[WARN] Bill image unavailable after {max_image_attempts} attempts; deferred until the next run: {msg.get("messageId") or h}')
             
             print(f"  Scroll {i}: Found {found_in_this_scroll} new messages (total {len(collected)})")
+            if images_loaded_in_scroll:
+                print(f'  Loaded {images_loaded_in_scroll} bill image(s)')
+
+            # Stop at the requested arrival-date boundary only after confirmed
+            # older movement and two fully dated, non-increasing visible batches.
+            # Unknown/invalid metadata never proves that the window is complete.
+            batch_dates = []
+            if days < 3650 and messages:
+                for msg in messages:
+                    try:
+                        if not isinstance(msg, dict):
+                            raise ValueError('unknown message metadata')
+                        batch_dates.append(parse_report_date(msg.get('messageDate', ''))[1])
+                    except (ValueError, TypeError, AttributeError):
+                        batch_dates = []
+                        break
+            latest_in_batch = max(batch_dates) if batch_dates else None
+            if (moved_older and latest_in_batch is not None and previous_batch_latest is not None
+                    and latest_in_batch <= previous_batch_latest < cutoff_date):
+                print('[INFO] Reached WhatsApp messages older than the requested scan window.')
+                reached_start = True
+                break
+            previous_batch_latest = latest_in_batch
 
             progress = move_whatsapp_history(driver)
+            consecutive_errors = 0
+            moved_older = bool(progress.get('found') and progress.get('before', 0) > progress.get('top', 0))
             time.sleep(2.5 if IS_WIN8_FAMILY else 1.5)
             empty_passes = empty_passes + 1 if found_in_this_scroll == 0 else 0
-            if empty_passes >= 4 and (not progress.get('found') or progress.get('atTop')):
+            if empty_passes >= 4 and not progress.get('found'):
+                stop_whatsapp_scan(collected, 'WhatsApp conversation scroll viewport could not be identified; only the visible messages were collected')
+                break
+            if empty_passes >= 4 and not progress.get('atTop') and not moved_older:
+                stop_whatsapp_scan(collected, 'WhatsApp history stopped moving before the beginning of the conversation; retry the incomplete scan')
+                break
+            if empty_passes >= 4 and progress.get('atTop'):
                 reached_start = True
                 break
                 
         except Exception as e:
-            print(f"  Scroll error {i}: {e}")
+            if browser_session_lost(e):
+                stop_whatsapp_scan(collected, 'Chrome closed or disconnected during the WhatsApp scan: ' + short_browser_error(e))
+                break
+            consecutive_errors += 1
+            print(f'  Scroll error {i} ({consecutive_errors}/3): {short_browser_error(e)}')
+            if consecutive_errors >= 3:
+                stop_whatsapp_scan(collected, 'WhatsApp scrolling failed three consecutive times; retry the scan after checking Chrome.')
+                break
             time.sleep(1)
             continue
     
-    if not reached_start:
-        collected.scan_incomplete = True
-        print('[WARN] History scan reached its limit before confirming the beginning of the conversation. '
-              'Older messages may remain; increase --days or use --all for an intentional history scan.')
+    if not reached_start and not collected.scan_incomplete:
+        stop_whatsapp_scan(collected, 'History scan reached its limit before confirming the requested window. '
+                            'Older messages may remain; retry the relevant window without clearing push history.')
     print(f"[INFO] Collected {len(collected)} messages")
     return collected
 
@@ -1251,21 +1347,21 @@ def read_last_n_days(days=30):
     try:
         driver.get("https://web.whatsapp.com")
         if not wait_for_whatsapp_login(driver):
-            driver.quit()
             return [], set()
         time.sleep(8 if IS_WIN8_FAMILY else 5)
         if not find_group(driver, GROUP_NAME):
             print(f"[FAIL] Group {GROUP_NAME} not found")
             print('[HINT] Confirm this group is visible in the logged-in WhatsApp account. '
                   'Set group_name in sheet_config.json to its exact name, including any emoji.')
-            driver.quit()
             return [], set()
         time.sleep(6 if IS_WIN8_FAMILY else 4)
         
         collected_dict = scroll_and_collect_with_image_fix(driver, days=days)
         history = load_history()
         parsed = []
-        scan_issues = ['WhatsApp history scan ended at its configured limit before confirming the conversation boundary'] if getattr(collected_dict, 'scan_incomplete', False) else []
+        scan_issues = list(getattr(collected_dict, 'scan_issues', []))
+        if getattr(collected_dict, 'scan_incomplete', False) and not scan_issues:
+            scan_issues.append('WhatsApp history scan ended before confirming the requested window')
         skipped_debug = []
         
         for h, item in collected_dict.items():
@@ -1329,15 +1425,14 @@ def read_last_n_days(days=30):
                 deduped[key] = entry
         parsed = list(deduped.values())
         parsed.sort(key=lambda x: x.get('date_obj') or datetime.min, reverse=True)
-        driver.quit()
         return ReportBatch(parsed, issues=scan_issues), history
     except Exception as e:
         print(f"[ERROR] {e}")
         import traceback
         traceback.print_exc()
-        try: driver.quit()
-        except: pass
         return [], set()
+    finally:
+        close_whatsapp_driver(driver)
 
 if __name__ == "__main__":
     try:

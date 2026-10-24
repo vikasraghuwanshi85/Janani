@@ -107,6 +107,7 @@ Run `run_daily.bat --check-webhook` to test the configured URL without opening W
 | --- | --- |
 | Missing Python/packages | Check the Python path in the log and install `requirements.txt` with that interpreter |
 | Chrome cannot start | Check the browser/driver versions and configured paths; close other Chrome instances using the Janani profile |
+| Chrome disconnects during scrolling / invalid session ID | The scan stops on a closed/crashed session, retains valid collected reports, and returns failure for the incomplete scan. Rerun the same BAT with Chrome's Janani window left open; retain push history. Missing images get at most three attempts per run and retry on a later run. |
 | WhatsApp login did not complete | Scan QR in the Chrome window opened by Janani, and allow chats to load within the 180-second wait. Login in another browser profile does not log in this one. Group search is skipped on timeout. |
 | Group not found after login | Confirm the logged-in account belongs to the group. Set `group_name` in `sheet_config.json` to the exact visible name, including any emoji. Search supports editable fields and text inputs, waits up to 30 seconds for them to load, excludes the message composer, and matches exact chat names. |
 | Bill OCR needs review | Install Hindi/English Tesseract data or inspect the unreadable image; see [BILL_OCR.md](BILL_OCR.md) |
@@ -117,6 +118,8 @@ Run `run_daily.bat --check-webhook` to test the configured URL without opening W
 | Another sync is running | Let the existing run finish; keep Task Scheduler's non-overlapping setting enabled |
 
 Do not delete push history, remove browser profile locks, or use `--force` as a general repair. Confirm the cause first. `daily_log.txt` grows as runs append output; archive it periodically if needed.
+
+The collector counts distinct messages separately from image retries, uses the requested 15-day received-message window when reliable dates establish its boundary, and stops stalled scrolling with a review status. A Chrome disconnection or cleanup failure does not erase the valid snapshot already collected; confirmed records can still be posted, while the run remains incomplete. An unavailable image is not acknowledged. The script cannot prevent Windows or a user from closing Chrome; keep the Janani browser window open and prevent overlapping scheduled/manual runs.
 
 ## Development checks
 
