@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
-PYTHON_BUILD = '2026-10-24.3'
+PYTHON_BUILD = '2026-10-24.4'
 
 class WebhookProtocolError(RuntimeError):
     """The deployment did not return the JSON contract required for uploads."""
@@ -283,7 +283,11 @@ def get_field(key, text, strict=False):
     for alias in aliases:
         if strict:
             prefix = r"(?:^|\n)[ \t]*" if key == "Total KM" and alias.lower() == "km" else r"(?<!\w)"
-            pattern = prefix + rf"{re.escape(alias)}(?!\w)[ \t]*[-:]?[ \t]*"
+            # Numeric labels may touch their value: "Previous odo331215".
+            # Keep the label boundary for letters; never trim or invent digits.
+            numeric = key in ('Present odo', 'Previous odo', 'Diesel amount', 'Diesel liter', 'Average', 'Rate', 'Total KM')
+            boundary = r"(?=\d|\b)" if numeric else r"(?!\w)"
+            pattern = prefix + re.escape(alias) + boundary + r"[ \t]*[-:]?[ \t]*"
         else:
             pattern = rf"(?<!\w){re.escape(alias)}(?!\w)\s*[-:]*\s*"
         m = re.search(pattern, cleaned, re.IGNORECASE)
@@ -324,7 +328,7 @@ def get_field(key, text, strict=False):
 
 def parse_odometer(value):
     # A second number is ambiguous; reject it rather than inventing a reading.
-    match = re.fullmatch(r"\s*(\d{1,3}(?:[,.]\s*\d{3})+|\d{1,2}(?:,\s*\d{2})+,\s*\d{3}|\d+)\s*(?:km|kms)?\s*", value, re.IGNORECASE)
+    match = re.fullmatch(r"\s*(\d{1,3}(?:[,.]\s*\d{3})+|\d{1,2}(?:,\s*\d{2})+,\s*\d{3}|\d{1,3}(?:[ \t\u00a0\u202f]+\d{3})+|\d+)\s*(?:km|kms)?\s*", value, re.IGNORECASE)
     if not match:
         return ""
     number = re.sub(r"[,.\s]", "", match.group(1))

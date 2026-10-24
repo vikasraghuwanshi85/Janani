@@ -46,7 +46,7 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(app.parse_message(fuel('361,260', '360,541'))['payload']['total_km'], '719')
 
     def test_grouped_odometer_formats_from_skip_log(self):
-        for value in ['447,194', '447, 194', '4,47,194', '447.194']:
+        for value in ['447,194', '447, 194', '4,47,194', '447.194', '447 194', '447\u202f194']:
             with self.subTest(value=value):
                 payload = app.parse_message(fuel(value, '446611'))['payload']
                 self.assertEqual(payload['present_odo'], '447194')
@@ -64,6 +64,18 @@ class ParsingTests(unittest.TestCase):
     def test_long_alias(self):
         text = fuel('361260', '360541').replace('Present odo -', 'Present Odo Reading -')
         self.assertEqual(app.parse_message(text)['payload']['present_odo'], '361260')
+
+    def test_numeric_label_touching_value_from_actual_export(self):
+        text = ('Fuel msg-\nDate-7/10/26\nLocation-SEGAON\nVehicle no-6073\n'
+                'Present odo-331956\nPrevious odo331215\nDiseal amount-4541.75\n'
+                'Diseal liter-44.95\nAverage-16.48\nPilot name-Test Driver\nPump Name-Sample Pump')
+        result = app.parse_message(text)
+        self.assertEqual(result['payload']['previous_odo'], '331215')
+        self.assertEqual(result['payload']['total_km'], '741')
+
+    def test_touching_label_does_not_consume_other_words_or_extra_digits(self):
+        self.assertEqual(app.get_field('Previous odo', 'Previous odometer331215', strict=True), '')
+        self.assertIsNone(app.parse_message(fuel('331956', '331215 4').replace('Previous odo - ', 'Previous odo')))
 
     def test_no_silent_truncation(self):
         self.assertIsNone(app.parse_message(fuel('12345678', '12345000')))

@@ -119,7 +119,7 @@ Run `run_daily.bat --check-webhook` to test the configured URL without opening W
 
 Do not delete push history, remove browser profile locks, or use `--force` as a general repair. Confirm the cause first. `daily_log.txt` grows as runs append output; archive it periodically if needed.
 
-Each run now logs `[BUILD]`, `[SCRIPT]`, `[PYTHON]`, and `[PROFILE]` before its checks. Build `2026-10-24.3` includes bounded scrolling, startup diagnostics, filtering before validation, and separate OCR/upload result counts. If that build is absent, or `[SCRIPT]` points elsewhere, the BAT/task is using an older copy. ChromeDriver warning/error diagnostics append to `chromedriver.log`; they provide startup detail without verbose command/image logging.
+Each run now logs `[BUILD]`, `[SCRIPT]`, `[PYTHON]`, and `[PROFILE]` before its checks. Build `2026-10-24.4` includes bounded scrolling, startup diagnostics, filtering before validation, separate OCR/upload result counts, and numeric labels touching their values (for example Previous odo331215). If that build is absent, or `[SCRIPT]` points elsewhere, the BAT/task is using an older copy. ChromeDriver warning/error diagnostics append to `chromedriver.log`; they provide startup detail without verbose command/image logging.
 
 After updating the Python file, compare these browser-only checks from the project folder:
 
