@@ -1,6 +1,7 @@
 whatsapp_session_janani
 pushed_history.json
 daily_log.txt
+chromedriver.log
 # Local Python environment and runtime artifacts
 .venv/
 .janani-runtime/

@@ -7,6 +7,8 @@ JANANI FLEET - V84 - FUEL REPORTS + BILL IMAGE OCR + DEBUG MODE
 
 Usage:
 python janani-webhook.py --check-webhook
+python janani-webhook.py --check-browser
+python janani-webhook.py --check-browser --fresh-profile
 python janani-webhook.py --days 7 --debug-fuel
 python janani-webhook.py --days 1 --force --debug-fuel
 
@@ -20,6 +22,7 @@ from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
+PYTHON_BUILD = '2026-10-24.2'
 
 class WebhookProtocolError(RuntimeError):
     """The deployment did not return the JSON contract required for uploads."""
@@ -174,6 +177,7 @@ GROUP_ALIASES = ["Janani AI Reporting", "Janani Reporting", "Janani AI", "Janani
 CHAT_DB_PATH = local_path("whatsapp_session_janani")
 WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxv1nErWrIV55nPz0NjXjvc71HMxnaeekujImRkl3y7cz0ptSpsUd3yVJS5jCAuqU4/exec"
 HISTORY_FILE = local_path("pushed_history.json")
+CHROMEDRIVER_LOG = local_path('chromedriver.log')
 MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
 DEFAULT_DAYS = 15
@@ -795,7 +799,7 @@ def save_history(s):
         if os.path.exists(temporary):
             os.unlink(temporary)
 
-def get_chrome_options_universal():
+def get_chrome_options_universal(profile_path=None):
     from selenium.webdriver.chrome.options import Options
     options = Options()
     if platform.system() != "Windows":
@@ -810,7 +814,7 @@ def get_chrome_options_universal():
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-notifications")
     options.add_argument("--start-maximized")
-    session_path = os.path.abspath(CHAT_DB_PATH)
+    session_path = os.path.abspath(profile_path or CHAT_DB_PATH)
     os.makedirs(session_path, exist_ok=True)
     # Never delete profile locks; a running browser may own this session.
     options.add_argument(f"--user-data-dir={session_path}")
@@ -820,7 +824,7 @@ def get_chrome_options_universal():
     options.add_experimental_option("prefs", {"profile.default_content_setting_values.notifications": 2})
     return options
 
-def create_driver_universal():
+def create_driver_universal(profile_path=None):
     print("="*60)
     print(f"JANANI V84 FUEL REPORTS + BILL IMAGE OCR - {DAYS_TO_SCAN} Days")
     print("Feature: Debug fuel parsing + --force flag")
@@ -830,7 +834,7 @@ def create_driver_universal():
     info = detect_windows()
     if info["is_unsupported"]:
         raise RuntimeError("Windows XP/Vista are unsupported by the required Python/browser stack. Use Windows 10/11.")
-    options = get_chrome_options_universal()
+    options = get_chrome_options_universal(profile_path) if profile_path else get_chrome_options_universal()
     configured_driver = local_path(DRIVER_PATH) if DRIVER_PATH else ""
     if configured_driver and not os.path.isfile(configured_driver):
         raise RuntimeError("Configured ChromeDriver does not exist: " + configured_driver)
@@ -842,20 +846,54 @@ def create_driver_universal():
             "chromedriver_path in sheet_config.json. WhatsApp may reject this obsolete browser; "
             "Windows 10/11 is recommended."
         )
+    driver = service = None
+    print('[CHROME PROFILE] ' + os.path.abspath(profile_path or CHAT_DB_PATH))
+    print('[CHROMEDRIVER LOG] ' + CHROMEDRIVER_LOG)
     try:
-        if driver_path:
-            driver = webdriver.Chrome(service=Service(driver_path), options=options)
-        else:
-            # Selenium Manager selects the driver for the installed Chrome on modern systems.
-            driver = webdriver.Chrome(options=options)
+        # A pathless Service still lets Selenium Manager find the matching driver.
+        # WARNING logs avoid recording every WhatsApp command/image payload.
+        service = Service(executable_path=driver_path or None, log_output=CHROMEDRIVER_LOG,
+                          service_args=['--log-level=WARNING'])
+        driver = webdriver.Chrome(service=service, options=options)
         driver.set_script_timeout(30)
         return driver
     except Exception as exc:
+        if driver is not None:
+            close_whatsapp_driver(driver)
+        elif service is not None:
+            try:
+                service.stop()
+            except Exception:
+                pass
         raise RuntimeError(
-            "Could not start Chrome. Install Chrome, use a ChromeDriver matching its major version, "
-            "and close any Chrome using whatsapp_session_janani. For offline/custom installations, "
-            "set JANANI_CHROME_BINARY and JANANI_CHROMEDRIVER. Details: " + str(exc)
+            'Could not start Chrome. Check the browser/driver and Janani profile shown above. '
+            'Startup diagnostics: ' + CHROMEDRIVER_LOG + '. Details: ' + short_browser_error(exc)
         ) from exc
+
+
+def print_startup_context():
+    print('[BUILD] ' + PYTHON_BUILD)
+    print('[SCRIPT] ' + os.path.realpath(__file__))
+    print('[PYTHON] ' + sys.executable)
+    print('[PROFILE] ' + os.path.abspath(CHAT_DB_PATH))
+
+
+def check_browser_startup(fresh_profile=False):
+    """Open and close Chrome only; never navigate WhatsApp or post reports."""
+    temporary = tempfile.TemporaryDirectory(prefix='janani-browser-check-') if fresh_profile else None
+    driver = None
+    try:
+        print('[BROWSER CHECK] ' + ('Temporary fresh profile' if temporary else 'Existing Janani profile'))
+        driver = create_driver_universal(profile_path=temporary.name) if temporary else create_driver_universal()
+        print('[BROWSER CHECK] Chrome started successfully; no WhatsApp scan or report upload was performed.')
+    finally:
+        if driver is not None:
+            close_whatsapp_driver(driver)
+        if temporary is not None:
+            try:
+                temporary.cleanup()
+            except OSError:
+                print('[WARN] Temporary diagnostic profile could not be cleaned up: ' + temporary.name)
 
 def wait_for_whatsapp_login(driver, timeout=180):
     print(f'[LOGIN] Waiting up to {timeout}s. Scan the QR code in the Chrome window opened by Janani.')
@@ -1435,6 +1473,18 @@ def read_last_n_days(days=30):
         close_whatsapp_driver(driver)
 
 if __name__ == "__main__":
+    print_startup_context()
+    if '--check-browser' in sys.argv:
+        try:
+            push_lock = acquire_push_lock()
+            check_browser_startup(fresh_profile='--fresh-profile' in sys.argv)
+        except Exception as ex:
+            print(f'[FAIL] Browser check: {ex}')
+            sys.exit(2)
+        sys.exit(0)
+    if '--fresh-profile' in sys.argv:
+        print('[FAIL] --fresh-profile is only valid with --check-browser')
+        sys.exit(2)
     try:
         check_webhook()
     except Exception as ex:

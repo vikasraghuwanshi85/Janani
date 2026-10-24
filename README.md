@@ -119,6 +119,17 @@ Run `run_daily.bat --check-webhook` to test the configured URL without opening W
 
 Do not delete push history, remove browser profile locks, or use `--force` as a general repair. Confirm the cause first. `daily_log.txt` grows as runs append output; archive it periodically if needed.
 
+Each run now logs `[BUILD]`, `[SCRIPT]`, `[PYTHON]`, and `[PROFILE]` before its checks. Build `2026-10-24.2` includes the bounded-scroll fix and startup diagnostics. If that build is absent, or `[SCRIPT]` points elsewhere, the BAT/task is using an older copy. ChromeDriver warning/error diagnostics append to `chromedriver.log`; they provide startup detail without verbose command/image logging.
+
+After updating the Python file, compare these browser-only checks from the project folder:
+
+```bat
+run_daily.bat --check-browser
+run_daily.bat --check-browser --fresh-profile
+```
+
+They test Chrome startup without scanning WhatsApp or posting reports, and still enforce the same sync lock. The fresh check uses a temporary profile and preserves the saved WhatsApp login/history. If only the fresh check succeeds, investigate the original profile or a background Chrome process retaining it; a successful fresh check is not a reason to delete the saved profile. If both checks fail, inspect Chrome/driver paths, Windows task/account context, and `chromedriver.log`. These checks and logs do not establish the exact cause of a Windows crash by themselves.
+
 The collector counts distinct messages separately from image retries, uses the requested 15-day received-message window when reliable dates establish its boundary, and stops stalled scrolling with a review status. A Chrome disconnection or cleanup failure does not erase the valid snapshot already collected; confirmed records can still be posted, while the run remains incomplete. An unavailable image is not acknowledged. The script cannot prevent Windows or a user from closing Chrome; keep the Janani browser window open and prevent overlapping scheduled/manual runs.
 
 ## Development checks

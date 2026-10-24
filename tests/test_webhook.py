@@ -487,7 +487,9 @@ class WindowsCompatibilityTests(unittest.TestCase):
                 app, 'get_chrome_options_universal', return_value=Mock()), patch.object(app, 'DRIVER_PATH', ''), patch.object(
                 app.shutil, 'which', return_value=None), patch('selenium.webdriver.Chrome') as chrome:
             app.create_driver_universal()
-            self.assertNotIn('service', chrome.call_args.kwargs)
+            service = chrome.call_args.kwargs['service']
+            self.assertFalse(service.path)
+            self.assertIn('--log-level=WARNING', service.service_args)
 
     def test_missing_configured_driver_reports_path(self):
         with patch.object(app, 'detect_windows', return_value={'is_legacy': False, 'is_unsupported': False}), patch.object(
