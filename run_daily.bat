@@ -25,13 +25,13 @@ if defined JANANI_PYTHON goto run_python
 goto finished
 :run_python
 >>"daily_log.txt" echo Using Python: "%JANANI_PYTHON%"
-"%JANANI_PYTHON%" -c "import sys, requests, selenium, PIL; sys.exit(0 if sys.version_info >= (3,8) else 1)" >>"daily_log.txt" 2>&1
+"%JANANI_PYTHON%" -c "import sys, requests, selenium; sys.exit(0 if sys.version_info >= (3,8) else 1)" >>"daily_log.txt" 2>&1
 if errorlevel 1 goto missing_packages
 "%JANANI_PYTHON%" -u "janani-webhook.py" --days 15 --debug --debug-fuel %* >>"daily_log.txt" 2>&1
 set "JANANI_EXIT=%errorlevel%"
 goto finished
 :missing_packages
->>"daily_log.txt" echo ERROR: Python 3.8+ and requests/Selenium/Pillow are required. Install requirements.txt with the Python shown above.
+>>"daily_log.txt" echo ERROR: Python 3.8+ and requests/Selenium are required. Install requirements.txt with the Python shown above.
 goto finished
 :missing_script
 >>"daily_log.txt" echo ERROR: Keep run_daily.bat beside janani-webhook.py.

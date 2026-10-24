@@ -1,14 +1,11 @@
 /**
- * JANANI FLEET V84 - complete web-app entry points.
+ * JANANI FLEET V85 - complete web-app entry points.
  * Use the generated Janani.gs as the single-file deployment.
  */
 var SHEET_ID = '1ii9MU_bScuYAqtuXGQyKd4QLsgHcwwJJLcfusoo5NWI';
 var BILL_IMAGES_FOLDER_ID = '1fGcvEMxynl9MNsADvpqFQEf1elDbrFgH';
 var BILL_LOG_SHEET_NAME = 'Bill log';
-// Optional existing folder IDs. Empty values create/reuse named children of Bills.
-var BILL_FUEL_FOLDER_ID = '';
-var BILL_MAINTENANCE_FOLDER_ID = '';
-var JANANI_VERSION = 'V84';
+var JANANI_VERSION = 'V85';
 var JANANI_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 var FUEL_HEADERS_OLD = ['Date', 'Location', 'Vehicle', 'Type', 'Present ODO', 'Previous ODO',
   'Total KM', 'Diesel Amount', 'Diesel Liter', 'Rate', 'Average', 'Bill Amount',
@@ -68,7 +65,17 @@ function normalizeFuelOdometer_(value) {
 function validateFuelPayload_(data) {
   var type = fuelString_(data.type || 'FUEL').toUpperCase();
   data.type = type;
-  if (type !== 'FUEL') return data;
+  if (type === 'MAINTENANCE') {
+    var maintenanceVehicle = fuelString_(data.vehicle || data.vehicle_id || data.vehicle_no).toUpperCase().replace(/[\s-]/g, '');
+    if (!/^(?:\d{4}|[A-Z]{2}\d{1,2}[A-Z]{0,3}\d{1,4})$/.test(maintenanceVehicle)) throw new Error('Missing or invalid maintenance vehicle ID.');
+    data.vehicle = maintenanceVehicle;
+    var amount = fuelString_(data.bill_amount);
+    if (amount && !/^\d+(?:\.\d+)?$/.test(amount)) throw new Error('Invalid maintenance bill amount.');
+    if (!amount && !fuelString_(data.work_details)) throw new Error('Maintenance report requires bill amount or work details.');
+    if (fuelString_(data.present_odo)) data.present_odo = normalizeFuelOdometer_(data.present_odo);
+    return data;
+  }
+  if (type !== 'FUEL') throw new Error('Unsupported report type.');
   var vehicle = fuelString_(data.vehicle || data.vehicle_id || data.vehicle_no).toUpperCase().replace(/[\s-]/g, '');
   if (!/^(?:\d{4}|[A-Z]{2}\d{1,2}[A-Z]{0,3}\d{1,4})$/.test(vehicle)) {
     throw new Error('Missing or invalid vehicle ID; use the WhatsApp source ID.');
@@ -193,7 +200,7 @@ function doGet(e) {
       var parsed = parseDate(params.date);
       return jsonResponseWithCallback({success: true, v: JANANI_VERSION, folder: parsed.folder,
         folderDashed: parsed.folderFull, folderFull: parsed.folderFull, sheet: BILL_LOG_SHEET_NAME,
-        fuelHeaders: FUEL_HEADERS_OLD, billFolders: {fuel: 'Fuel', maintenance: 'Maintanence'}}, params);
+        fuelHeaders: FUEL_HEADERS_OLD, billUploadMode: 'DIRECT', billOcrRequired: false, billsParentId: BILL_IMAGES_FOLDER_ID}, params);
     }
     if (action === 'fix_headers') {
       return jsonResponseWithCallback({success: false, v: JANANI_VERSION,

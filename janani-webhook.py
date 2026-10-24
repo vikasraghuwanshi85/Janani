@@ -1,6 +1,6 @@
 """
-JANANI FLEET - V84 - FUEL REPORTS + BILL IMAGE OCR + DEBUG MODE
-- New fuel entry not pushing? V84 shows WHY
+JANANI FLEET - V85 - FUEL + MAINTENANCE REPORTS + DEBUG MODE
+- New fuel entry not pushing? V85 shows WHY
 - Added --force flag to force push even if in history
 - Added detailed fuel debug logging
 - Fixed fuel parsing edge cases
@@ -14,7 +14,7 @@ python janani-webhook.py --days 1 --force --debug-fuel
 
 Bills always respect push history, including with --force. Bill dates come from
 the caption or WhatsApp metadata; undated bill dates remain blank.
-Images route by OCR to Fuel/Maintanence; ambiguous odometers are skipped.
+Images upload directly to Bills without parsing. Maintenance data comes from WhatsApp text.
 """
 
 import os, re, time, requests, json, hashlib, sys, io, platform, base64, tempfile, shutil, unicodedata, math
@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
-PYTHON_BUILD = '2026-10-24.4'
+PYTHON_BUILD = '2026-10-24.5'
 
 class WebhookProtocolError(RuntimeError):
     """The deployment did not return the JSON contract required for uploads."""
@@ -125,10 +125,10 @@ def check_webhook():
     if result.get('success') is False:
         raise WebhookProtocolError('Deployment check failed: ' + str(result.get('error', 'unknown Apps Script error')))
     version = re.match(r'^V(\d+)\b', str(result.get('v', '')))
-    expected_folders = {'fuel': 'Fuel', 'maintenance': 'Maintanence'}
-    if not version or int(version.group(1)) < 84 or result.get('billFolders') != expected_folders:
-        raise WebhookProtocolError('The URL is not serving V84 (or newer) with fixed Fuel/Maintanence bill folders. Save the complete Janani.gs, then Deploy > Manage deployments > Edit > New version > Deploy.')
-    print('[CHECK] Webhook ' + str(result['v']) + ': JSON response and Fuel/Maintanence routing check passed')
+    expected_mode = 'DIRECT'
+    if not version or int(version.group(1)) < 85 or result.get('billUploadMode') != expected_mode or result.get('billOcrRequired') is not False:
+        raise WebhookProtocolError('The URL is not serving V85 (or newer) with direct bill uploads and OCR disabled. Save the complete Janani.gs, then Deploy > Manage deployments > Edit > New version > Deploy.')
+    print('[CHECK] Webhook ' + str(result['v']) + ': JSON response and direct bill upload check passed')
     return result
 
 def detect_windows():
@@ -210,13 +210,11 @@ elif days_from_arg is not None: DAYS_TO_SCAN = days_from_arg
 CONFIG_FILE = local_path("sheet_config.json")
 BROWSER_BINARY = os.environ.get("JANANI_CHROME_BINARY", "")
 DRIVER_PATH = os.environ.get("JANANI_CHROMEDRIVER", "")
-OCR_CONFIG = {}
 WHATSAPP_DATE_ORDER = 'MDY'
 if os.path.exists(CONFIG_FILE):
     try:
         with open(CONFIG_FILE, encoding="utf-8") as stream:
             cfg = json.load(stream)
-        OCR_CONFIG = {key: value for key, value in cfg.items() if key.startswith('bill_ocr_')}
         BROWSER_BINARY = BROWSER_BINARY or cfg.get("chrome_binary", "")
         DRIVER_PATH = DRIVER_PATH or cfg.get("chromedriver_path", "")
         WHATSAPP_DATE_ORDER = str(cfg.get('whatsapp_date_order', 'MDY')).upper()
@@ -285,7 +283,7 @@ def get_field(key, text, strict=False):
             prefix = r"(?:^|\n)[ \t]*" if key == "Total KM" and alias.lower() == "km" else r"(?<!\w)"
             # Numeric labels may touch their value: "Previous odo331215".
             # Keep the label boundary for letters; never trim or invent digits.
-            numeric = key in ('Present odo', 'Previous odo', 'Diesel amount', 'Diesel liter', 'Average', 'Rate', 'Total KM')
+            numeric = key in ('Present odo', 'Previous odo', 'Diesel amount', 'Diesel liter', 'Average', 'Rate', 'Total KM', 'Bill amount')
             boundary = r"(?=\d|\b)" if numeric else r"(?!\w)"
             pattern = prefix + re.escape(alias) + boundary + r"[ \t]*[-:]?[ \t]*"
         else:
@@ -296,7 +294,7 @@ def get_field(key, text, strict=False):
             next_m = re.search(next_pattern, cleaned[start:], re.IGNORECASE)
             if next_m:
                 val = cleaned[start:start+next_m.start()].strip()
-                if strict: val = val.split("\n")[0].strip()
+                if strict and key != "Work details": val = val.split("\n")[0].strip()
             else:
                 val = cleaned[start:].strip().split("\n")[0].strip()
                 if not strict and key not in ("Present odo", "Previous odo"):
@@ -371,6 +369,13 @@ def fuel_content_key(entry):
 
 
 def already_pushed(entry, history):
+    if entry.get('type') == 'MAINTENANCE' and not entry.get('has_image'):
+        if entry['unique_key'] in history:
+            return True
+        legacy = entry.get('legacy_maintenance_key')
+        if legacy and legacy in history:
+            print('[HISTORY] Legacy maintenance record: verify any edits against its existing sheet row: ' + legacy)
+            return True
     if not entry.get('has_image') and entry.get('type') == 'FUEL':
         content_key = fuel_content_key(entry)
         associated_prefix = content_key.rsplit('_', 1)[0] + '_'
@@ -419,6 +424,8 @@ def is_target_message(text):
     if text in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]']: return True
     check_text = clean_text_for_parsing(text)
     tl = check_text.lower()
+    if get_field('Bill amount', text, strict=True) or get_field('Work details', text, strict=True):
+        return True
     # Filter out template/header rows that are just field names without values (like "Vehicle no PRESENTODO FUEL")
     # These rows have field names but no actual numbers after dash
     if re.search(r'^\s*Vehicle\s*no\s+PRESENTODO', check_text, re.I):
@@ -487,7 +494,7 @@ def extract_vehicle_id(text):
 
 def capitalize_name(name):
     if not name: return ""
-    name = re.sub(r'^[^A-Za-z0-9]+', '', name)
+    name = re.sub(r'^[\W_]+', '', name, flags=re.UNICODE)
     return " ".join(word.capitalize() for word in name.lower().split())
 
 def parse_date_strict_ddmmyyyy(date_str):
@@ -558,7 +565,7 @@ def message_scan_date(item):
     return max(dates) if dates else None
 
 def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug=False, message_date=""):
-    """V84 with debug reason why fuel not parsed"""
+    """V85 with debug reason why fuel not parsed"""
     check_text = original_text_for_vehicle or text
     if text in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]']:
         check_text = original_text_for_vehicle or ""
@@ -594,7 +601,10 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
         else:
             date_folder, d, month_name = parse_report_date(date_str)
     except ValueError:
-        return None, ["Missing or invalid report date; correct the source message before retrying"]
+        if image_data:
+            date_folder, d, month_name = '', None, ''
+        else:
+            return None, ["Missing or invalid report date; correct the source message before retrying"]
     
     vehicle_text = text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text
     vehicle_raw = extract_vehicle_id(vehicle_text)
@@ -624,6 +634,10 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
     tl = (text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text).lower()
     
     if image_data: msg_type = "MAINTENANCE"
+    elif re.search(r'\b(?:mntc|maintenance|maintanence|maintenence)(?:\s*msg)?\b', tl):
+        msg_type = 'MAINTENANCE'
+    elif re.search(r'\bfuel\s*(?:msg|message)\b', tl): msg_type = 'FUEL'
+    elif get_field('Bill amount', text, strict=True) or get_field('Work details', text, strict=True): msg_type = 'MAINTENANCE'
     elif "present" in tl and "odo" in tl: msg_type = "FUEL"
     elif "prev" in tl and "odo" in tl: msg_type = "FUEL"
     elif "diesel" in tl and ("amount" in tl or "liter" in tl): msg_type = "FUEL"
@@ -682,17 +696,19 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
             parsed_rate = parse_decimal_field(supplied_rate, "rate")
             if not parsed_rate or abs(float(parsed_rate) - float(diesel_amt_clean) / float(diesel_ltr_clean)) > 0.02:
                 return None, ["Rate does not match diesel amount / liters; correct the source message"]
-    else:
-        bill_raw = get_field("Bill amount", text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text)
-        if bill_raw:
-            m = re.search(r"(\d+\.?\d*)", bill_raw)
-            if m: bill_amount = m.group(1)
-        work_details = get_field("Work details", text if text not in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]'] else check_text)
+    elif not image_data:
+        bill_raw = get_field('Bill amount', text, strict=True)
+        bill_amount = parse_decimal_field(bill_raw, 'amount') if bill_raw else ''
+        if bill_raw and (not bill_amount or not math.isfinite(float(bill_amount))):
+            return None, ['Invalid maintenance bill amount; correct the source message']
+        work_details = get_field('Work details', text, strict=True)
         if not bill_amount and not work_details:
-            if image_data:
-                work_details = f"Bill image - {check_text[:50] if check_text else 'Bill from group'}"
-                bill_amount = "0"
-    
+            return None, ['Maintenance report requires a bill amount or work details']
+        present_raw = get_field('Present odo', text, strict=True)
+        present = parse_odometer(present_raw) if present_raw else ''
+        if present_raw and not present:
+            return None, ['Invalid optional maintenance odometer; correct the source message']
+
     target_sheet = "Bill log" if msg_type == "MAINTENANCE" and image_data else month_name
     
     image_hash_for_payload = ""
@@ -731,7 +747,7 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
         "rate": rate_val,
         "average": average_val,
         "bill_amount": bill_amount,
-        "work_details": get_field("Work details", text),
+        "work_details": work_details,
         "pilot": capitalize_name(get_field("Pilot name", text)),
         "pump": capitalize_name(get_field("Pump Name", text)),
         "source": "Janani Reporting",
@@ -755,36 +771,20 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
         if msg_type == "FUEL":
             simple_key = f"{date_folder}_{vehicle_raw}_{present}_{prev}_FUEL".lower()
         else:
-            simple_key = f"{date_folder}_{vehicle_raw}_{bill_amount}_{work_details[:30]}_MAINT".lower()
+            legacy_maintenance_key = f"{date_folder}_{vehicle_raw}_{bill_amount}_{work_details[:30]}_MAINT".lower()
+            maintenance_content = {key: payload[key] for key in ('date', 'vehicle', 'type', 'present_odo', 'bill_amount', 'work_details', 'location', 'pilot', 'pump')}
+            simple_key = 'maintenance_' + hashlib.sha256(json.dumps(maintenance_content, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
     
-    return {"month": month_name, "date_folder": date_folder, "unique_key": simple_key, "payload": payload, "date_obj": d, "type": msg_type, "present": present, "has_image": bool(image_data)}, debug_info
+    result = {"month": month_name, "date_folder": date_folder, "unique_key": simple_key, "payload": payload, "date_obj": d, "type": msg_type, "present": present, "has_image": bool(image_data)}
+    if msg_type == 'MAINTENANCE' and not image_data:
+        result['legacy_maintenance_key'] = legacy_maintenance_key
+    return result, debug_info
 
 def parse_message(text, image_data="", original_text_for_vehicle="", message_date=""):
     result, _ = parse_message_debug(text, image_data, original_text_for_vehicle, debug=False, message_date=message_date)
     return result
 
 
-def classify_bill_for_upload(entry):
-    """Classify image pixels, independent of caption and numeric report fields."""
-    if not entry.get('has_image'):
-        return None
-    from bill_classifier import classify_bill_image
-    result = classify_bill_image(entry['payload']['image_data'], config=OCR_CONFIG,
-                                 cache_path=local_path('bill_ocr_cache.json'))
-    category = result.get('bill_category')
-    if category not in ('FUEL', 'MAINTENANCE') or result.get('review_required'):
-        raise RuntimeError('Bill OCR needs review: ' + str(result.get('reason', 'classification unavailable')))
-    payload = entry['payload']
-    payload.update(bill_category=category, bill_type=category,
-                   bill_folder='Fuel' if category == 'FUEL' else 'Maintanence',
-                   ocr_status='classified', ocr_reason=result.get('reason', ''),
-                   ocr_engine=result.get('ocr_engine', ''),
-                   ocr_confidence=result.get('confidence', 0),
-                   ocr_classifier_version=result.get('classifier_version', ''),
-                   ocr_review_required=bool(result.get('review_required')))
-    print('[OCR] ' + payload['bill_folder'] + ': ' + str(result.get('reason', ''))
-          + ' (confidence ' + str(result.get('confidence', 0)) + ')')
-    return result
 
 def acquire_push_lock():
     # Keep the handle open for the entire run; OS releases it on exit/crash.
@@ -859,7 +859,7 @@ def get_chrome_options_universal(profile_path=None):
 
 def create_driver_universal(profile_path=None):
     print("="*60)
-    print(f"JANANI V84 FUEL REPORTS + BILL IMAGE OCR - {DAYS_TO_SCAN} Days")
+    print(f"JANANI V85 FUEL + MAINTENANCE REPORTS - {DAYS_TO_SCAN} Days")
     print("Feature: Debug fuel parsing + --force flag")
     print("="*60)
     from selenium import webdriver
@@ -1418,7 +1418,7 @@ def read_last_n_days(days=30):
     if not SELENIUM_AVAILABLE:
         print("[ERROR] Selenium not installed")
         return [], set()
-    print(f"Platform: {platform.platform()} | Scanning {days} days - V84")
+    print(f"Platform: {platform.platform()} | Scanning {days} days - V85")
     cutoff_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1) if days < 3650 else datetime(2000, 1, 1)
     print(f"[INFO] Cutoff: {cutoff_date.strftime('%d/%m/%y')}")
     try:
@@ -1483,6 +1483,14 @@ def read_last_n_days(days=30):
                         print(f"  [FILTERED BY DATE] Fuel {result['payload']['vehicle']} {result['date_folder']} < cutoff {cutoff_date.strftime('%d/%m/%y')}")
                     continue
                 parsed.append(result)
+                if img_data and (re.search(r'\b(?:mntc|maintenance|maintanence|maintenence)(?:\s*msg)?\b', txt, re.IGNORECASE) or get_field('Bill amount', txt, strict=True) or get_field('Work details', txt, strict=True)):
+                    maintenance, issues = parse_message_debug(txt, message_date=item.get('message_date', ''))
+                    if maintenance and maintenance['type'] == 'MAINTENANCE':
+                        maintenance['message_id'] = item.get('message_id', '')
+                        maintenance['payload']['message_id'] = item.get('message_id', '')
+                        parsed.append(maintenance)
+                    elif issues:
+                        scan_issues.append('Maintenance caption [' + message_reference(item, h) + ']: ' + '; '.join(issues))
             else:
                 if debug_info:
                     reference = message_reference(item, h)
@@ -1505,7 +1513,7 @@ def read_last_n_days(days=30):
         parsed.sort(key=lambda x: x.get('date_obj') or datetime.min, reverse=True)
         fuel = sum(1 for e in parsed if e.get('type') == 'FUEL')
         maint = sum(1 for e in parsed if e.get('type') == 'MAINTENANCE')
-        print(f"[INFO] V84 - Fuel: {fuel}, Bills: {maint}, History: {len(history)}")
+        print(f"[INFO] V85 - Fuel: {fuel}, Bills: {maint}, History: {len(history)}")
         
         deduped = {}
         for entry in parsed:
@@ -1544,7 +1552,7 @@ if __name__ == "__main__":
     if '--check-webhook' in sys.argv:
         sys.exit(0)
     print("="*60)
-    print(f"JANANI V84 FUEL REPORTS + BILL IMAGE OCR - {DAYS_TO_SCAN} Days")
+    print(f"JANANI V85 FUEL + MAINTENANCE REPORTS - {DAYS_TO_SCAN} Days")
     print(f"Force: {FORCE_PUSH} | Debug Fuel: {DEBUG_FUEL}")
     print("="*60)
     push_lock = acquire_push_lock()
@@ -1581,7 +1589,6 @@ if __name__ == "__main__":
         push_list = to_push
         confirmed_pushes = 0
         failed_pushes = 0
-        held_for_ocr = 0
         processed_pushes = 0
         
         for idx, e in enumerate(push_list):
@@ -1592,23 +1599,15 @@ if __name__ == "__main__":
             target = payload.get('target_sheet', 'unknown')
             print(f"[{idx+1}/{len(push_list)}] {has_img} {payload['vehicle']} {payload['date']} {payload['type']} | {size:.1f}KB -> {target}")
             
-            if payload.get('has_image'):
-                try:
-                    classify_bill_for_upload(e)
-                except Exception as ex:
-                    held_for_ocr += 1
-                    print(f"  -> [HOLD OCR] {payload['vehicle']} {payload['date']}: {ex}; image was not sent and history was not updated")
-                    continue
             try:
                 r = requests.post(WEBHOOK_URL, json=payload, timeout=90)
                 j = webhook_json(r)
                 print(f"  -> {json.dumps(j, ensure_ascii=False)[:800]}")
                 if j.get("success") is True or j.get("duplicate") is True:
                     if payload.get('has_image') and (not all(j.get(field) for field in ('driveLink', 'fileId', 'folderId'))
-                            or j.get('billFolder') != payload.get('bill_folder')
-                            or j.get('billCategory') != payload.get('bill_category')):
+                            or j.get('billUploadMode') != 'DIRECT'):
                         failed_pushes += 1
-                        print('  -> [FAIL] Bill response did not confirm its Drive URL and classified folder; history not updated')
+                        print('  -> [FAIL] Bill response did not confirm its Drive URL and direct upload mode; history not updated')
                         continue
                     history.update(bill_history_keys(e))
                     save_history(history)
@@ -1630,10 +1629,10 @@ if __name__ == "__main__":
                 failed_pushes += 1
                 print(f"  Push failed: {ex}")
         
-        print(f'\n[RESULT] Confirmed: {confirmed_pushes}; upload unconfirmed: {failed_pushes}; held for OCR: {held_for_ocr}; not processed: {len(push_list) - processed_pushes}')
+        print(f'\n[RESULT] Confirmed: {confirmed_pushes}; upload unconfirmed: {failed_pushes}; not processed: {len(push_list) - processed_pushes}')
         scan_issues = getattr(entries, 'scan_issues', []) + getattr(push_list, 'scan_issues', [])
         for issue in scan_issues:
             print('[REVIEW] ' + issue)
-        if failed_pushes or held_for_ocr or scan_issues:
+        if failed_pushes or scan_issues:
             sys.exit(1)
         print("[DONE] Janani sync")

@@ -39,6 +39,19 @@ function fixture(options = {}) {
       if (options.folderError) throw Error('Folder creation denied');
       const f = folder(name, 'folder_' + state.folders.length); state.folders.push(f); return f;
     }};
+  parent.getName = () => 'Bills';
+  parent.getFiles = () => iterator(state.files.filter(f => f.folderId === 'configured-parent'));
+  parent.createFile = blob => {
+    if (options.uploadError) throw Error('Drive upload failed');
+    const file = {folderId: 'configured-parent', name: blob.name, bytes: blob.bytes, description: '',
+      id: 'file_' + state.files.length, getId() {return this.id;}, getName() {return this.name;},
+      getUrl() {return 'https://drive.google.com/file/d/' + this.id + '/view';},
+      setDescription(v) {this.description = v;}, getDescription() {return this.description;}, setSharing() {},
+      getBlob() {return {getBytes: () => this.bytes};}, getParents() {return iterator(this.folderId === parent.getId() ? [parent] : state.folders.filter(f => f.getId() === this.folderId));},
+      moveTo(target) {this.folderId = target.getId(); state.moves++;}
+    };
+    state.files.push(file); return file;
+  };
   const sheet = {getLastRow: () => state.rows.length, getMaxColumns: () => options.maxColumns || 26, insertColumnAfter() {state.inserts++;},
     getDataRange: () => ({getValues: () => state.rows, getNotes: () => state.notes}),
     getRange(row, column) {return {
@@ -79,52 +92,42 @@ function fixture(options = {}) {
   return {state, options, parent, context, write: (data = payload) => context.writeBillReportV81_(data, ss, {})};
 }
 
-test('bill goes to fixed Fuel folder with confirmed URL and category', () => {
-  const f = fixture(); const result = f.write();
-  assert.equal(result.dateFolder, ''); assert.equal(result.billFolder, 'Fuel'); assert.equal(result.billCategory, 'FUEL');
-  assert.equal(result.success, true);
-  assert.equal(f.state.files.length, 1);
-  assert.equal(f.state.folders[0].getName(), 'Fuel');
-  assert.equal(f.state.rows[1][3], result.driveLink);
-  assert.equal(f.state.rows[1][6], hash);
-  assert.equal(f.state.rows[1][8], 'FUEL'); assert.equal(f.state.rows[1][7], '');
-  assert.equal(f.state.released, 1);
+test('uploads directly with URL, no category/OCR/subfolder requirement', () => {
+  const f = fixture(); const result = f.write({...payload, bill_category: undefined, ocr_status: 'failed'});
+  assert.equal(result.success, true); assert.equal(result.billUploadMode, 'DIRECT');
+  assert.equal(result.folderId, 'configured-parent'); assert.equal(f.state.folders.length, 0);
+  assert.equal(f.state.rows[1][3], result.driveLink); assert.equal(f.state.rows[1][6], hash);
 });
-
-test('retry reuses the same file and log row', () => {
-  const f = fixture(); f.write(); const result = f.write();
-  assert.equal(result.duplicate, true);
-  assert.equal(f.state.files.length, 1);
-  assert.equal(f.state.rows.length, 2);
-});
-
-test('invalid/conflicting date metadata does not upload', () => {
-  for (const data of [
-    {...payload, date: '31/02/26', original_date: '31/02/26', date_folder: '31-02-2026'},
-    {...payload, date: '07/10/26'}]) {
-    const f = fixture(); assert.throws(() => f.write(data), /date/i);
-    assert.equal(f.state.files.length, 0);
-  }
-});
-
-test('Drive access and fixed-folder creation failures never fall back', () => {
-  for (const options of [{accessError: true}, {folderError: true}]) {
-    const f = fixture(options); assert.throws(() => f.write(), /inaccessible|denied/);
-    assert.equal(f.state.files.length, 0); assert.equal(f.state.rows.length, 1);
-    assert.equal(f.state.released, 1);
-  }
-});
-
-test('upload failure leaves no successful Bill log row', () => {
-  const f = fixture({uploadError: true}); assert.throws(() => f.write(), /upload failed/);
-  assert.equal(f.state.rows.length, 1); assert.equal(f.state.files.length, 0);
-});
-
-test('retry after upload succeeded but log failed does not create another file', () => {
-  const options = {logError: true}; const f = fixture(options);
-  assert.throws(() => f.write(), /Sheet write failed/); assert.equal(f.state.files.length, 1);
-  options.logError = false; assert.equal(f.write().duplicate, true);
+test('same bytes reuse file and row on repeat', () => {
+  const f = fixture(); f.write(); assert.equal(f.write().duplicate, true);
   assert.equal(f.state.files.length, 1); assert.equal(f.state.rows.length, 2);
+});
+test('missing metadata never fabricates date', () => {
+  const f = fixture(); const result = f.write({...payload, date: '', original_date: '', date_folder: 'ignored'});
+  assert.equal(result.date, ''); assert.equal(f.state.rows[1][0], ''); assert.equal(f.state.folders.length, 0);
+});
+test('access and upload failures are not acknowledged', () => {
+  for (const options of [{accessError: true}, {uploadError: true}]) {
+    const f = fixture(options); assert.throws(() => f.write(), /inaccessible|failed/); assert.equal(f.state.rows.length, 1);
+  }
+});
+test('log failure recovers existing file instead of copying', () => {
+  const f = fixture({logError: true}); assert.throws(() => f.write(), /Sheet write failed/);
+  f.options.logError = false; assert.equal(f.write().duplicate, true);
+  assert.equal(f.state.files.length, 1); assert.equal(f.state.rows.length, 2);
+});
+test('unknown creation outcome blocks a second file', () => {
+  const f = fixture({uploadError: true}); assert.throws(() => f.write(), /failed/);
+  f.options.uploadError = false; assert.throws(() => f.write(), /unconfirmed/); assert.equal(f.state.files.length, 0);
+});
+test('failed file-ID journal recovers from root reservation', () => {
+  const f = fixture({journalFileIdError: true}); assert.throws(() => f.write(), /journal/);
+  f.options.journalFileIdError = false; assert.equal(f.write().duplicate, true); assert.equal(f.state.files.length, 1);
+});
+test('invalid date and checksum fail before upload', () => {
+  for (const data of [{...payload, date: '31/02/26'}, {...payload, image_hash: '0'.repeat(64)}]) {
+    const f = fixture(); assert.throws(() => f.write(data)); assert.equal(f.state.files.length, 0);
+  }
 });
 
 test('old log entry without a Drive link is uploaded instead of skipped', () => {
@@ -144,7 +147,7 @@ test('existing referenced bill in wrong folder is moved and link reused', () => 
 test('different date metadata for same bytes reuses the file without dated folders', () => {
   const f = fixture(); f.write();
   const result = f.write({...payload, date: '06/10/26', original_date: '06/10/26', date_folder: '06-10-2026'});
-  assert.equal(result.dateFolder, ''); assert.equal(result.moved, false); assert.equal(result.billFolder, 'Fuel');
+  assert.equal(result.dateFolder, ''); assert.equal(result.moved, false); assert.equal(result.billFolder, 'Bills');
   assert.equal(f.state.files.length, 1); assert.equal(f.state.rows.length, 2);
 });
 
@@ -161,65 +164,6 @@ test('conflicting content behind an existing link is not silently replaced', () 
   assert.equal(f.state.files.length, 1);
 });
 
-test('OCR nonmatch routes to exactly Maintanence, reclassification moves rather than copies', () => {
-  const f = fixture(); const first = f.write();
-  const result = f.write({...payload, bill_category: 'MAINTENANCE', ocr_reason: 'No station match'});
-  assert.equal(result.billFolder, 'Maintanence'); assert.equal(result.billCategory, 'MAINTENANCE');
-  assert.equal(result.moved, true); assert.equal(result.driveLink, first.driveLink);
-  assert.equal(f.state.files.length, 1); assert.equal(f.state.rows.length, 2); assert.equal(f.state.rows[1][8], 'MAINTENANCE');
-  assert.deepEqual(f.state.folders.map(folder => folder.getName()), ['Fuel', 'Maintanence']);
-});
-
-test('missing/unknown category and failed/review-required OCR never upload', () => {
-  for (const change of [{bill_category: ''}, {bill_category: 'UNKNOWN'}, {bill_category: 'REPAIRS'},
-    {ocr_status: 'failed'}, {review_required: true}, {ocr_review_required: 'true'}, {ocr_confidence: '-1'}]) {
-    const f = fixture(); assert.throws(() => f.write({...payload, ...change}), /category|OCR/i);
-    assert.equal(f.state.files.length, 0); assert.equal(f.state.folders.length, 0);
-  }
-});
-
-test('absent dates remain blank and deprecated date_folder never controls Drive routing', () => {
-  const f = fixture(); const result = f.write({...payload, date: '', original_date: '', date_folder: '31-02-2026'});
-  assert.equal(result.date, ''); assert.equal(f.state.rows[1][0], ''); assert.equal(f.state.rows[1][4], '');
-  assert.deepEqual(f.state.folders.map(folder => folder.getName()), ['Fuel']);
-});
-
-test('category header aliases are reused and a missing column appends without shifting existing data', () => {
-  for (const alias of ['Category', 'Bill Type', 'Bill Category']) {
-    const f = fixture(); f.state.rows[0][7] = alias; f.write();
-    assert.equal(f.state.rows[0].length, 8); assert.equal(f.state.rows[1][7], 'FUEL');
-  }
-  const f = fixture({maxColumns: 8}); f.state.rows.push(['existing', 'unrelated', '', 'old-url', '', '', '', 'keep']);
-  f.write(); assert.equal(f.state.inserts, 1); assert.equal(f.state.rows[1][7], 'keep'); assert.equal(f.state.rows[0][8], 'Bill Category');
-  const g = fixture({newSheet: true}); g.write(); assert.ok(g.state.rows[0].includes('Bill Category')); assert.ok(!g.state.rows[0].includes('Date Folder'));
-});
-
-test('explicit category folder IDs must have the exact name and direct parent', () => {
-  const f = fixture(); const folder = f.parent.createFolder('Fuel'); f.context.BILL_FUEL_FOLDER_ID = folder.getId();
-  assert.equal(f.write().folderId, folder.getId()); assert.equal(f.state.folders.length, 1);
-  const g = fixture(); const wrong = g.parent.createFolder('Maintanence'); g.context.BILL_FUEL_FOLDER_ID = wrong.getId();
-  assert.throws(() => g.write(), /exact name/); assert.equal(g.state.files.length, 0);
-  const h = fixture(); const outside = h.parent.createFolder('Fuel'); outside.getParents = () => iterator([]);
-  h.context.BILL_FUEL_FOLDER_ID = outside.getId(); assert.throws(() => h.write(), /direct child/);
-  const j = fixture(); j.parent.createFolder('Fuel'); j.parent.createFolder('Fuel');
-  assert.throws(() => j.write(), /Multiple bill folders/); assert.equal(j.state.files.length, 0);
-});
-
-test('interrupted creation recovers across category/name changes before Drive indexing', () => {
-  const options = {journalFileIdError: true, searchIndexLag: true}; const f = fixture(options);
-  assert.throws(() => f.write(), /journal write failed/); assert.equal(f.state.files.length, 1);
-  options.journalFileIdError = false;
-  const result = f.write({...payload, bill_category: 'MAINTENANCE', file_name: 'corrected.png'});
-  assert.equal(result.duplicate, true); assert.equal(result.moved, true); assert.equal(f.state.files.length, 1);
-  assert.equal(f.state.rows.length, 2); assert.equal(Object.keys(f.state.pending).length, 0);
-});
-
-test('uncertain creation refuses a second create until its outcome is reconciled', () => {
-  const options = {uploadError: true}; const f = fixture(options);
-  assert.throws(() => f.write(), /upload failed/); options.uploadError = false;
-  assert.throws(() => f.write(), /outcome is unconfirmed/); assert.equal(f.state.files.length, 0);
-});
-
 test('historical dated-folder orphan is recovered but outside matching files are untouched', () => {
   const f = fixture(); f.write(); const legacy = f.parent.createFolder('08-10-2026'); f.state.files[0].folderId = legacy.getId();
   f.state.rows.splice(1); f.state.notes.splice(1); const result = f.write();
@@ -231,10 +175,4 @@ test('historical dated-folder orphan is recovered but outside matching files are
 test('conflicting managed copies block success without another copy', () => {
   const f = fixture(); f.write(); f.state.files.push({...f.state.files[0], id: 'historical-copy'});
   assert.throws(() => f.write(), /Multiple Drive files/); assert.equal(f.state.files.length, 2);
-});
-
-test('private OCR body is omitted from persisted metadata', () => {
-  const f = fixture(); f.write({...payload, ocr_text: 'PRIVATE OCR BODY 9876543210', ocr_reason: 'Name match\n' + 'x'.repeat(500)});
-  assert.ok(!f.state.files[0].description.includes('PRIVATE OCR BODY')); assert.ok(!f.state.notes[1][1].includes('PRIVATE OCR BODY'));
-  assert.match(f.state.notes[1][1], /OCR: classified/); assert.ok(f.state.notes[1][1].length < 600);
 });

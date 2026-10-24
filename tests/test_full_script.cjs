@@ -51,6 +51,19 @@ function fixture(options = {}) {
         }};
       state.folders.push(f); return f;
     }};
+  parent.getName = () => 'Bills';
+  parent.getFiles = () => iter(state.files.filter(f => f.folderId === 'configured-root'));
+  parent.createFile = blob => {
+    if (options.uploadError) throw Error('Drive upload failed');
+    const file = {folderId: 'configured-root', name: blob.name, bytes: blob.bytes, description: '',
+      id: 'file_' + state.files.length, getId() {return this.id;}, getName() {return this.name;},
+      getUrl() {return 'https://drive.google.com/file/d/' + this.id + '/view';},
+      setDescription(v) {this.description = v;}, getDescription() {return this.description;}, setSharing() {},
+      getBlob() {return {getBytes: () => this.bytes};}, getParents() {return iter(this.folderId === parent.getId() ? [parent] : state.folders.filter(f => f.getId() === this.folderId));},
+      moveTo(target) {this.folderId = target.getId();}
+    };
+    state.files.push(file); return file;
+  };
   const context = vm.createContext({Date, Number, String, Object, Error, JSON, Array,
     ContentService: {MimeType: {JSON: 'json', JAVASCRIPT: 'javascript'}, createTextOutput(text) {
       return {text, setMimeType(mime) {this.mime = mime; return this;}};
@@ -84,7 +97,7 @@ test('complete file contains its modules exactly once', () => {
 test('doPost writes October ID and rejects duplicate without another row', () => {
   const f = fixture(); const result = f.post(sample);
   assert.equal(result.success, true); assert.equal(result.vehicleColumn, 3);
-  assert.equal(result.v, 'V84');
+  assert.equal(result.v, 'V85');
   assert.equal(f.state.sheets.Oct.rows[1][2], '7412');
   assert.equal(f.post(sample).duplicate, true); assert.equal(f.state.sheets.Oct.rows.length, 2);
 });
@@ -129,26 +142,22 @@ test('grouped readings are normalized and absent calculations are computed', () 
   assert.equal(f.state.sheets.Oct.rows[1][10], '15.66');
 });
 
-test('doPost routes classified image to fixed Fuel folder and reuses it on retry', () => {
-  const f = fixture(); const image = Buffer.from('image bytes');
-  const data = {action: 'insert', date: '08/10/26', original_date: '08/10/26', date_folder: '08-10-2026',
-    bill_category: 'FUEL', ocr_status: 'classified', ocr_reason: 'Matched Aadeshwar Fuels Hindi',
-    vehicle: '7412', image_data: 'data:image/png;base64,' + image.toString('base64')};
-  const result = f.post(data); assert.equal(result.success, true); assert.equal(result.billFolder, 'Fuel'); assert.equal(result.dateFolder, '');
-  assert.ok(result.driveLink); assert.equal(f.state.files.length, 1);
+test('image bill uploads directly and reuses its link without OCR', () => {
+  const f = fixture(); const data = {image_data: Buffer.from('image').toString('base64')};
+  const result = f.post(data); assert.equal(result.success, true); assert.equal(result.billUploadMode, 'DIRECT');
+  assert.equal(result.folderId, 'configured-root'); assert.equal(result.date, ''); assert.ok(result.driveLink);
   assert.equal(f.post(data).duplicate, true); assert.equal(f.state.files.length, 1);
-  assert.equal(f.state.sheets['Bill log'].rows.length, 2);
-  assert.equal(f.state.sheets['Bill log'].rows[1][7], 'FUEL');
-  assert.deepEqual(f.state.folders.map(folder => folder.getName()), ['Fuel']);
+  assert.equal(f.state.sheets['Bill log'].rows.length, 2); assert.equal(f.state.folders.length, 0);
 });
-
-test('image bill requires explicit OCR category and optional dates stay blank', () => {
-  const f = fixture(); const image_data = Buffer.from('maintenance image').toString('base64');
-  assert.equal(f.post({image_data}).success, false); assert.equal(f.state.files.length, 0);
-  const result = f.post({image_data, bill_category: 'MAINTENANCE', ocr_status: 'classified'});
-  assert.equal(result.success, true); assert.equal(result.billFolder, 'Maintanence'); assert.equal(result.date, '');
-  assert.equal(f.state.sheets['Bill log'].rows[1][0], '');
-  assert.equal(f.get({action: 'get_all_data'}).data[0]['Bill Category'], 'MAINTENANCE');
+test('maintenance text requires no fuel readings, preserves work and deduplicates', () => {
+  const f = fixture(); const data = {date: '08/10/26', type: 'MAINTENANCE', vehicle: '7412', bill_amount: '1250', work_details: 'Electric work', message_id: 'maintenance-source'};
+  assert.equal(f.post(data).success, true); assert.equal(f.post(data).duplicate, true);
+  const row = f.state.sheets.Oct.rows[1]; assert.equal(row[3], 'MAINTENANCE'); assert.equal(row[11], '1250'); assert.equal(row[12], 'Electric work');
+  assert.equal(f.state.sheets.Oct.rows.length, 2);
+  assert.equal(f.post({...data, bill_amount: '1500'}).success, false);
+});
+test('invalid maintenance amount is rejected', () => {
+  const f = fixture(); assert.equal(f.post({date: '08/10/26', type: 'MAINTENANCE', vehicle: '7412', bill_amount: '12x50'}).success, false);
 });
 
 test('Drive failure reaches doPost as success:false', () => {
@@ -176,7 +185,7 @@ test('date test and JSON POST read actions retain the full year', () => {
   const f = fixture();
   assert.equal(f.get({action: 'test_date', date: '8/10/26'}).folderFull, '08-10-2026');
   assert.equal(f.post({action: 'test_date', date: '8/10/26'}).folderFull, '08-10-2026');
-  assert.deepEqual(f.get({action: 'test_date', date: '8/10/26'}).billFolders, {fuel: 'Fuel', maintenance: 'Maintanence'});
+  assert.equal(f.get({action: 'test_date', date: '8/10/26'}).billUploadMode, 'DIRECT');
   assert.equal(f.get({action: 'test_date', date: '31/02/26'}).success, false);
 });
 

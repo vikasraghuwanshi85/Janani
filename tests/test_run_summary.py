@@ -7,12 +7,11 @@ from test_webhook import SOURCE, app, bill, fuel
 
 
 class RunSummaryTests(unittest.TestCase):
-    def run_main(self, entries, classifier, responses):
+    def run_main(self, entries, responses):
         namespace = dict(app.__dict__, __name__='__main__', FORCE_PUSH=False,
                          print_startup_context=Mock(), check_webhook=lambda: None,
                          read_last_n_days=lambda **kwargs: (entries, set()),
-                         acquire_push_lock=lambda: Mock(), save_history=Mock(),
-                         classify_bill_for_upload=classifier)
+                         acquire_push_lock=lambda: Mock(), save_history=Mock())
         main = next(node for node in ast.parse(SOURCE.read_text()).body
                     if isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
                     and any(isinstance(value, ast.Constant) and value.value == '__main__'
@@ -28,34 +27,18 @@ class RunSummaryTests(unittest.TestCase):
                        if call.args and str(call.args[0]).strip().startswith('[RESULT]'))
         return summary, exit_code, post
 
-    def test_mixed_success_ocr_hold_and_rejected_upload_are_disjoint(self):
-        held = bill()
-        rejected = bill(image='data:image/jpeg;base64,' + base64.b64encode(b'other bill').decode())
-        def classify(entry):
-            if entry is held:
-                raise RuntimeError('Hindi OCR missing')
-            entry['payload'].update(bill_category='MAINTENANCE', bill_folder='Maintanence')
-        entries = [app.parse_message(fuel('361260', '360541')), held, rejected]
-        summary, code, post = self.run_main(entries, classify, ['{"success":true}', '{"success":false,"error":"Drive permission"}'])
-        self.assertEqual(summary, '[RESULT] Confirmed: 1; upload unconfirmed: 1; held for OCR: 1; not processed: 0')
+    def test_image_upload_failure_is_separate_from_unprocessed_records(self):
+        entries = [app.parse_message(fuel('361260', '360541')), bill()]
+        summary, code, post = self.run_main(entries, ['{"success":true}', '{"success":false,"error":"Drive permission"}'])
+        self.assertEqual(summary, '[RESULT] Confirmed: 1; upload unconfirmed: 1; not processed: 0')
         self.assertEqual(post.call_count, 2)
-        self.assertEqual(code, 1)
-
-    def test_held_bill_is_not_also_counted_as_not_processed(self):
-        def classify(entry):
-            raise RuntimeError('Unreadable image')
-        summary, code, post = self.run_main([bill()], classify, [])
-        self.assertEqual(summary, '[RESULT] Confirmed: 0; upload unconfirmed: 0; held for OCR: 1; not processed: 0')
-        post.assert_not_called()
         self.assertEqual(code, 1)
 
     def test_protocol_stop_counts_only_remaining_entries_as_not_processed(self):
         entries = [app.parse_message(fuel('361260', '360541')), bill()]
-        classifier = Mock()
-        summary, code, post = self.run_main(entries, classifier, ['<html>Script function not found: doPost</html>'])
-        self.assertEqual(summary, '[RESULT] Confirmed: 0; upload unconfirmed: 1; held for OCR: 0; not processed: 1')
+        summary, code, post = self.run_main(entries, ['<html>Script function not found: doPost</html>'])
+        self.assertEqual(summary, '[RESULT] Confirmed: 0; upload unconfirmed: 1; not processed: 1')
         post.assert_called_once()
-        classifier.assert_not_called()
         self.assertEqual(code, 1)
 
     def test_rejection_reference_identifies_source_without_full_message(self):

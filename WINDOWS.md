@@ -21,7 +21,7 @@ Run regression tests using `.venv\Scripts\python.exe -m unittest discover -s tes
 
 ## Daily scheduling
 
-Keep `run_daily.bat` beside `janani-webhook.py`. Install `requirements.txt` and Hindi/English Tesseract (see [BILL_OCR.md](BILL_OCR.md)), then run `run_daily.bat` manually and complete the WhatsApp QR login. The batch file uses an existing `.venv`, the Python launcher, or Python on PATH; it scans the last 15 days with debug enabled, appends Python output and timestamps to `daily_log.txt`, and returns Python's exit code. Keep push history intact and do not add `--force` to the daily schedule. The Python exit code alone does not confirm successful uploads; inspect the log for login, collection, and webhook results.
+Keep `run_daily.bat` beside `janani-webhook.py`. Install `requirements.txt`, then run `run_daily.bat` manually and complete the WhatsApp QR login. The batch file uses an existing `.venv`, the Python launcher, or Python on PATH; it scans the last 15 days with debug enabled, appends Python output and timestamps to `daily_log.txt`, and returns Python's exit code. Keep push history intact and do not add `--force` to the daily schedule. The Python exit code alone does not confirm successful uploads; inspect the log for login, collection, and webhook results.
 
 In Windows Task Scheduler, create a task with these settings (replace `C:\Janani` with your actual folder):
 

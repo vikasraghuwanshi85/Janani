@@ -98,7 +98,7 @@ class ParsingTests(unittest.TestCase):
         p = app.parse_message('[IMAGE_ONLY_BILL]', IMAGE)['payload']
         self.assertEqual(p['date'], '')
         self.assertEqual(p['original_date'], '')
-        self.assertIsNone(bill('31/02/2026'))
+        self.assertEqual(bill('31/02/2026')['payload']['date'], '')
 
     def test_bill_caption_date_with_display_time(self):
         payload = app.parse_message('Date - 08/10/2026 10:30 AM\nVehicle no - 7412', IMAGE)['payload']
@@ -299,9 +299,9 @@ class WebhookDeploymentTests(unittest.TestCase):
                 app.webhook_json(self.response(body))
 
     def test_read_only_preflight_checks_version_and_folder(self):
-        response = self.response('{"success":true,"v":"V84","billFolders":{"fuel":"Fuel","maintenance":"Maintanence"}}')
+        response = self.response('{"success":true,"v":"V85","billUploadMode":"DIRECT","billOcrRequired":false}')
         with patch.object(app.requests, 'get', return_value=response) as get, patch.object(app.requests, 'post') as post, patch('builtins.print'):
-            self.assertEqual(app.check_webhook()['v'], 'V84')
+            self.assertEqual(app.check_webhook()['v'], 'V85')
         self.assertEqual(get.call_args.kwargs['params'], {'action': 'test_date', 'date': '09/10/26'})
         post.assert_not_called()
 
@@ -347,7 +347,6 @@ class WebhookDeploymentTests(unittest.TestCase):
         namespace = dict(app.__dict__, __name__='__main__', FORCE_PUSH=False,
                          check_webhook=lambda: None, read_last_n_days=lambda **kwargs: ([entry, entry], history),
                          acquire_push_lock=lambda: Mock(), save_history=Mock(),
-                         classify_bill_for_upload=lambda entry: None,
                          select_entries_to_push=lambda *args, **kwargs: [entry, entry])
         with patch.object(app.requests, 'post', return_value=self.response('<html>Script function not found: doPost</html>')) as post, patch('builtins.print'), self.assertRaises(SystemExit) as error:
             self.run_main(namespace)
@@ -361,8 +360,7 @@ class WebhookDeploymentTests(unittest.TestCase):
         history = set()
         namespace = dict(app.__dict__, __name__='__main__', FORCE_PUSH=False,
                          check_webhook=lambda: None, read_last_n_days=lambda **kwargs: ([entry], history),
-                         acquire_push_lock=lambda: Mock(), save_history=Mock(),
-                         classify_bill_for_upload=lambda entry: None)
+                         acquire_push_lock=lambda: Mock(), save_history=Mock())
         with patch.object(app.requests, 'post', return_value=self.response('{"success":false,"error":"Drive access denied"}')), patch.object(app.time, 'sleep'), patch('builtins.print'), self.assertRaises(SystemExit) as error:
             self.run_main(namespace)
         self.assertEqual(error.exception.code, 1)

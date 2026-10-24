@@ -16,7 +16,7 @@ Windows 7/8/8.1 require older Python/browser versions and a matching driver inst
 ## First-time Windows setup
 
 1. Copy the complete repository into a writable local folder, for example `C:\Janani`.
-2. Install Python 3 with its launcher and Google Chrome. Install Tesseract with Hindi and English trained data as described in [BILL_OCR.md](BILL_OCR.md). In that folder, install packages once: `py -3 -m pip install -r requirements.txt`. An existing `.venv` is also supported; install its packages with `.venv\Scripts\python.exe -m pip install -r requirements.txt`.
+2. Install Python 3 with its launcher and Google Chrome. In that folder, install packages once: `py -3 -m pip install -r requirements.txt`. An existing `.venv` is also supported; install its packages with `.venv\Scripts\python.exe -m pip install -r requirements.txt`.
 3. Deploy the complete [Apps Script](apps_script/Janani.gs) using the [deployment instructions](apps_script/DEPLOY_COMPLETE.md). Add its `/exec` URL and the exact WhatsApp group name to `sheet_config.json` if the defaults differ.
 4. Run `run_daily.bat` manually. Scan the QR code in the Chrome window opened by Janani, then check `daily_log.txt` for the matched group, validation warnings, and confirmed sheet/Drive responses.
 
@@ -52,8 +52,7 @@ Optionally create `sheet_config.json` beside `janani-webhook.py`. Only include s
   "webhook_url": "https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec",
   "group_name": "Janani AI Reporting",
   "days": 15,
-  "whatsapp_date_order": "MDY",
-  "bill_ocr_engine": "tesseract"
+  "whatsapp_date_order": "MDY"
 }
 ```
 
@@ -65,7 +64,7 @@ Configuration, history, the sync lock, and the WhatsApp profile resolve beside t
 
 ## Complete Google Apps Script
 
-Use [apps_script/Janani.gs](apps_script/Janani.gs) as a single-file replacement containing the vehicle, fuel validation, fixed bill-category routing, duplicate/retry, and dashboard fixes. Follow the [deployment instructions](apps_script/DEPLOY_COMPLETE.md); do not keep duplicate helper definitions alongside the bundle. Live deployment is performed through Apps Script.
+Use [apps_script/Janani.gs](apps_script/Janani.gs) as a single-file replacement containing the vehicle, fuel validation, direct bill-image upload and maintenance-message parsing, duplicate/retry, and dashboard fixes. Follow the [deployment instructions](apps_script/DEPLOY_COMPLETE.md); do not keep duplicate helper definitions alongside the bundle. Live deployment is performed through Apps Script.
 
 ## Vehicle IDs from WhatsApp
 
@@ -85,23 +84,33 @@ This message sends `vehicle`, `vehicle_id`, and `vehicle_no` as `5998` in the we
 
 The supplied V79 Apps Script only maps a header called `Vehicle`, while October uses **Vehicle No (Full)**. This makes the October cell blank even when Python sends `vehicle`. Apply the [Apps Script fuel-column fix](apps_script/README.md) to the deployed project; it supports both headers, writes timestamps, and finds duplicate-check columns by name. Renaming a sheet column does not by itself change a JSON key. Existing blank October rows are not automatically filled or replayed by this fix; do not use `--force` to backfill them indiscriminately because that can create additional fuel duplicates.
 
-## Bill classification and fuel safeguards
+## Bill images and maintenance messages
 
-Bill images go to **Janani Reporting → Bills → Fuel** or **Janani Reporting → Bills → Maintanence**. Apps Script creates only these fixed category folders when missing; it creates no date subfolders. The spelling `Maintanence` matches the requested folder name.
+All bill images upload directly into the existing **Janani Reporting → Bills** folder. There is no OCR, image classification, image-number extraction, or new subfolder creation. Pillow, Tesseract and Google Vision are not required. Each successful upload records a Drive URL and image checksum in Bill log. SHA-256, history and server retry checks prevent copying an identical image again; incomplete creation is reconciled before another create. Existing category/date folders and acknowledged images are not reorganized automatically.
 
-[Hindi/English image OCR](BILL_OCR.md) recognizes the merchant phrase **Aadeshwar Fuels**, including `आदेश्वर फ्यूल्स`, directly in image pixels. Captions, pump names, and generic words such as diesel do not determine classification. Recognized fuel bills get `Bill Category = FUEL`; readable other bills get `MAINTENANCE`. OCR errors, missing Hindi data, and uncertain/unreadable images stay unacknowledged for review/retry. OCR does not fill odometers, amounts, liters, or dates from image text.
+Maintenance data comes from WhatsApp text such as:
 
-Dates in captions remain DD/MM/YYYY. Numeric WhatsApp message dates default to MM/DD/YYYY for this Windows account; set `whatsapp_date_order` to `DMY` if your WhatsApp uses DD/MM. The scan covers 15 calendar dates, including today, using received dates when available; captions can describe older reports. A bill with no date can upload with a blank date because its folder is category-based. Invalid supplied dates are flagged, never replaced with today. Unknown received-date context is logged for review rather than treated as a guessed date.
+```text
+Mntc MSG-
+Date-24/10/26
+Location-Khargone
+Vehicle no-7485
+Present odo-
+Bill amount-600
+Work details-Tyre repair
+Pilot name-Raja
+Pump Name-Workshop
+```
 
-Image bytes are hashed with SHA-256; local history protects repeated images and old acknowledged images. Apps Script verifies bytes, serializes writes, and journals incomplete uploads so retries reuse a file and log row. A successful bill response must contain `driveLink`, `fileId`, `folderId`, `billCategory`, and the selected `billFolder` before Python saves history. In an uncertain interrupted creation, another copy is blocked until the reserved outcome is checked. Different encodings of a visually identical picture are not proven identical solely by hashes.
+This writes a **MAINTENANCE** row into `Oct`, with Bill Amount, Work Details, Pilot, Pump, Location and Vehicle in their corresponding columns. Date and vehicle are required; at least amount or work details is required. A supplied amount must be valid; it is not guessed or shortened. Present ODO is optional; no previous ODO, liters, fuel rate or average is required. Multiline work and Hindi names are preserved. Text-message IDs and business fields prevent repeated maintenance inserts. Corrected records conflicting with a saved source ID require review.
 
-Previously acknowledged images and existing dated folders are not automatically migrated or deleted. A verified repeated request for an existing matched image can move that same file into its category folder, preserving the URL. Keep push history; do not clear it to reorganize old folders. Historical migration needs a separate review.
+A maintenance caption with an attached image produces two independent records: the image URL in Bill log, and its maintenance text in the month's sheet. An invalid caption does not stop image storage; its text is flagged separately. Fuel text processing remains active with its existing numeric validation and history safeguards.
 
-Fuel text reports use complete numeric values and validate dates, both odometers, money, liters, supplied distance, rate, and mileage. Ambiguous extra digits and inconsistent calculations are flagged rather than guessed. Source typos that remain numerically plausible cannot always be detected. Fuel content fingerprints preserve exact retries and surface conflicting source edits; legacy history without fingerprints is respected with a review warning. Scan limits and rejected/conflicting fuel reports produce a nonzero result after valid records are sent.
+The default scan remains 15 days. Keep `pushed_history.json`; previously held images were not acknowledged and can upload normally. Images must still download from WhatsApp; unavailable images remain pending for retry. Images are never interpreted to fill financial fields or to choose a category.
 
 ## Logs and troubleshooting
 
-Run `run_daily.bat --check-webhook` to test the configured URL without opening WhatsApp or sending any fuel reports or bill images. It requires the complete V84 or newer Apps Script and verifies its fixed Fuel/Maintanence folder response. Every normal run performs this check first. See [complete deployment instructions](apps_script/DEPLOY_COMPLETE.md) for replacing the script and publishing a new deployment version. The check verifies the HTTP handler, not spreadsheet/Drive permissions; successful uploads verify those separately.
+Run `run_daily.bat --check-webhook` to test the configured URL without opening WhatsApp or sending any fuel reports or bill images. It requires the complete V85 or newer Apps Script and verifies its direct image-upload mode. Every normal run performs this check first. See [complete deployment instructions](apps_script/DEPLOY_COMPLETE.md) for replacing the script and publishing a new deployment version. The check verifies the HTTP handler, not spreadsheet/Drive permissions; successful uploads verify those separately.
 
 | Symptom | Check |
 | --- | --- |
@@ -110,7 +119,7 @@ Run `run_daily.bat --check-webhook` to test the configured URL without opening W
 | Chrome disconnects during scrolling / invalid session ID | The scan stops on a closed/crashed session, retains valid collected reports, and returns failure for the incomplete scan. Rerun the same BAT with Chrome's Janani window left open; retain push history. Missing images get at most three attempts per run and retry on a later run. |
 | WhatsApp login did not complete | Scan QR in the Chrome window opened by Janani, and allow chats to load within the 180-second wait. Login in another browser profile does not log in this one. Group search is skipped on timeout. |
 | Group not found after login | Confirm the logged-in account belongs to the group. Set `group_name` in `sheet_config.json` to the exact visible name, including any emoji. Search supports editable fields and text inputs, waits up to 30 seconds for them to load, excludes the message composer, and matches exact chat names. |
-| Bill OCR needs review | Install Hindi/English Tesseract data or inspect the unreadable image; see [BILL_OCR.md](BILL_OCR.md) |
+| Bill image unavailable | Open/download the original photo in WhatsApp and rerun; image recognition is not required |
 | Suspicious odometer warning | Correct the source reading; use `--debug-fuel` to inspect parsing |
 | Upload timeout or webhook error | Inspect the Apps Script deployment, access permissions, and execution logs before retrying |
 | `Script function not found: doGet` or `doPost` | Paste the entire `apps_script/Janani.gs`, save, and deploy a **new version** of the web app; verify the `/exec` URL in `sheet_config.json` |
@@ -119,7 +128,7 @@ Run `run_daily.bat --check-webhook` to test the configured URL without opening W
 
 Do not delete push history, remove browser profile locks, or use `--force` as a general repair. Confirm the cause first. `daily_log.txt` grows as runs append output; archive it periodically if needed.
 
-Each run now logs `[BUILD]`, `[SCRIPT]`, `[PYTHON]`, and `[PROFILE]` before its checks. Build `2026-10-24.4` includes bounded scrolling, startup diagnostics, filtering before validation, separate OCR/upload result counts, and numeric labels touching their values (for example Previous odo331215). If that build is absent, or `[SCRIPT]` points elsewhere, the BAT/task is using an older copy. ChromeDriver warning/error diagnostics append to `chromedriver.log`; they provide startup detail without verbose command/image logging.
+Each run now logs `[BUILD]`, `[SCRIPT]`, `[PYTHON]`, and `[PROFILE]` before its checks. Build `2026-10-24.5` includes bounded scrolling, startup diagnostics, filtering before validation, separate OCR/upload result counts, and numeric labels touching their values (for example Previous odo331215). If that build is absent, or `[SCRIPT]` points elsewhere, the BAT/task is using an older copy. ChromeDriver warning/error diagnostics append to `chromedriver.log`; they provide startup detail without verbose command/image logging.
 
 After updating the Python file, compare these browser-only checks from the project folder:
 
@@ -132,7 +141,7 @@ They test Chrome startup without scanning WhatsApp or posting reports, and still
 
 The collector counts distinct messages separately from image retries, uses the requested 15-day received-message window when reliable dates establish its boundary, and stops stalled scrolling with a review status. A Chrome disconnection or cleanup failure does not erase the valid snapshot already collected; confirmed records can still be posted, while the run remains incomplete. An unavailable image is not acknowledged. The script cannot prevent Windows or a user from closing Chrome; keep the Janani browser window open and prevent overlapping scheduled/manual runs.
 
-Result counts are separate: **Confirmed** records have an acknowledged response and saved history; **upload unconfirmed** records lack that confirmation; **held for OCR** images were reviewed by the local classification step but not sent; **not processed** records were left after an interrupted batch. OCR-held records are not also counted as unprocessed. The `[HOLD OCR]` line contains the actual OCR/setup reason. Source validation failures appear separately under `[SKIP]` / `[REVIEW]`, with date, vehicle and message ID for lookup. Records reliably outside the scan window are filtered before validation, so old malformed messages do not fail the current daily run.
+Result counts are separate: **Confirmed** records have an acknowledged response and saved history; **upload unconfirmed** records lack that confirmation; **not processed** records remain after an interrupted batch. Rejected text reports appear under SKIP/REVIEW with their date, vehicle and source message ID. OCR holds no longer exist. Records outside the window are filtered before validation.
 
 ## Development checks
 

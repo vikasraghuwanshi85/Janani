@@ -53,7 +53,7 @@ function fuelString_(value) {
 
 function fuelComparableV83_(value, field) {
   var text = fuelString_(value);
-  if (['present_odo', 'previous_odo', 'total_km', 'diesel_amount', 'diesel_liter', 'rate', 'average'].indexOf(field) >= 0 && /^\d+(?:\.\d+)?$/.test(text)) {
+  if (['present_odo', 'previous_odo', 'total_km', 'diesel_amount', 'diesel_liter', 'rate', 'average', 'bill_amount'].indexOf(field) >= 0 && /^\d+(?:\.\d+)?$/.test(text)) {
     return String(Number(text));
   }
   return text;
@@ -86,7 +86,7 @@ function writeFuelReportV80_(data, targetSheet, monthName, dateForSheet, date, s
 
     var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
     var indexes = fuelColumnIndexes_(headers);
-    ['date', 'vehicle', 'type', 'present_odo', 'previous_odo'].forEach(function(field) {
+    (fuelString_(data.type || 'FUEL').toUpperCase() === 'FUEL' ? ['date', 'vehicle', 'type', 'present_odo', 'previous_odo'] : ['date', 'vehicle', 'type', 'bill_amount', 'work_details']).forEach(function(field) {
       if (!Object.prototype.hasOwnProperty.call(indexes, field)) {
         throw new Error('Missing recognized ' + field + ' column in ' + monthSheetName + '; no row written.');
       }
@@ -117,8 +117,8 @@ function writeFuelReportV80_(data, targetSheet, monthName, dateForSheet, date, s
     }
 
     var allRows = sheet.getDataRange().getValues();
-    var notes = values.type === 'FUEL' ? sheet.getDataRange().getNotes() : [];
-    var messageId = values.type === 'FUEL' ? fuelString_(data.message_id) : '';
+    var notes = sheet.getDataRange().getNotes();
+    var messageId = fuelString_(data.message_id);
     if (messageId.length > 1024 || /[\r\n\x00-\x1f]/.test(messageId)) throw new Error('Invalid WhatsApp message ID; no row written.');
     for (var i = 1; i < allRows.length; i++) {
       var row = allRows[i];
@@ -126,13 +126,14 @@ function writeFuelReportV80_(data, targetSheet, monthName, dateForSheet, date, s
         fuelString_(row[indexes.vehicle]).toUpperCase() === vehicle &&
         fuelString_(row[indexes.type]).toUpperCase() === values.type;
       if (values.type !== 'FUEL') {
-        // Preserve the existing maintenance/text behavior: deduplicate only
-        // reports with a present odometer using the original identity fields.
-        if (values.present_odo && sameReport &&
-            fuelString_(row[indexes.present_odo]) === values.present_odo &&
-            fuelString_(row[indexes.previous_odo]) === values.previous_odo) {
+        var fields = ['bill_amount', 'work_details', 'present_odo', 'location', 'pilot', 'pump'];
+        var sameDetails = fields.every(function(field) {return indexes[field] === undefined || fuelComparableV83_(row[indexes[field]], field) === fuelComparableV83_(values[field], field);});
+        var maintenanceNote = notes[i] ? String(notes[i][indexes.date] || '') : '';
+        var sameMaintenanceMessage = messageId && maintenanceNote.split('\n').indexOf('Janani Message ID: ' + messageId) >= 0;
+        if (sameMaintenanceMessage && (!sameReport || !sameDetails)) throw new Error('Maintenance message differs from its existing sheet row; review before retrying.');
+        if (sameMaintenanceMessage || (sameReport && sameDetails)) {
           return jsonResponseWithCallback({success: true, status: 'duplicate', sheet: monthSheetName,
-            duplicate: true, vehicle: vehicle, existingRow: i + 1, v: 'V80 vehicle headers'}, params);
+            duplicate: true, vehicle: vehicle, existingRow: i + 1}, params);
         }
         continue;
       }
@@ -160,7 +161,7 @@ function writeFuelReportV80_(data, targetSheet, monthName, dateForSheet, date, s
     });
     var nextRow = sheet.getLastRow() + 1;
     // Apply text formatting before writing, including numeric-looking vehicle IDs.
-    ['date', 'vehicle', 'present_odo', 'previous_odo'].forEach(function(field) {
+    ['date', 'vehicle', 'present_odo', 'previous_odo'].filter(function(field) {return indexes[field] !== undefined;}).forEach(function(field) {
       sheet.getRange(nextRow, indexes[field] + 1).setNumberFormat('@');
     });
     sheet.appendRow(rowData);

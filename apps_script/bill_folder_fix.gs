@@ -47,23 +47,6 @@ function billHasParentV81_(file, folderId) {
   return false;
 }
 
-function billCategoryFolderV84_(parent, category) {
-  var name = category === 'FUEL' ? 'Fuel' : 'Maintanence';
-  var id = category === 'FUEL' ? BILL_FUEL_FOLDER_ID : BILL_MAINTENANCE_FOLDER_ID;
-  if (id) {
-    var configured = DriveApp.getFolderById(id);
-    if (configured.getName() !== name || !billHasParentV81_(configured, parent.getId())) {
-      throw new Error('Configured ' + name + ' folder must be a direct child of the bill root with that exact name.');
-    }
-    return configured;
-  }
-  var folders = parent.getFoldersByName(name);
-  if (!folders.hasNext()) return parent.createFolder(name);
-  var folder = folders.next();
-  if (folders.hasNext()) throw new Error('Multiple bill folders named ' + name + '; reconcile them before retrying.');
-  return folder;
-}
-
 function billManagedFileV84_(file, parentId) {
   var pending = [], parents = file.getParents(), seen = {}, count = 0;
   while (parents.hasNext()) pending.push(parents.next());
@@ -89,7 +72,7 @@ function billPendingFileV84_(properties, key, hash, parent) {
   if (pending.fileId) file = DriveApp.getFileById(pending.fileId);
   else {
     var folder = DriveApp.getFolderById(pending.folderId);
-    if (!billManagedFileV84_(folder, parent.getId())) throw new Error('Pending bill folder is outside the configured bill root.');
+    if (folder.getId() !== parent.getId() && !billManagedFileV84_(folder, parent.getId())) throw new Error('Pending bill folder is outside the configured bill root.');
     var files = folder.getFiles(), matches = [];
     while (files.hasNext()) {var candidate = files.next(); if (candidate.getName() === pending.fileName) matches.push(candidate);}
     if (matches.length > 1) throw new Error('Multiple files match an interrupted bill upload; reconcile before retrying.');
@@ -129,17 +112,6 @@ function billRecoverFilesV84_(parent, folder, hash, fileName, originalName, refe
 }
 
 function writeBillReportV81_(data, ss, params) {
-  var category = String(data.bill_category || '').trim().toUpperCase();
-  if (['FUEL', 'MAINTENANCE'].indexOf(category) < 0) throw new Error('Missing or invalid OCR bill_category; no upload performed.');
-  if (data.review_required === true || data.ocr_review_required === true || String(data.review_required).toLowerCase() === 'true' || String(data.ocr_review_required).toLowerCase() === 'true') {
-    throw new Error('Bill OCR requires review; no upload performed.');
-  }
-  var ocrStatus = String(data.ocr_status || '').trim().toLowerCase();
-  if (ocrStatus && ['ok', 'success', 'classified'].indexOf(ocrStatus) < 0) throw new Error('Bill OCR did not complete successfully; no upload performed.');
-  var reason = String(data.ocr_reason || '').replace(/[\r\n\x00-\x1f]+/g, ' ').slice(0, 240);
-  var engine = String(data.ocr_engine || '').replace(/[\r\n\x00-\x1f]+/g, ' ').slice(0, 80);
-  var confidence = data.ocr_confidence === undefined || data.ocr_confidence === null ? '' : String(data.ocr_confidence);
-  if (confidence && (!/^\d+(?:\.\d+)?$/.test(confidence) || Number(confidence) > 100)) throw new Error('Invalid bill OCR confidence.');
   var dates = [data.original_date, data.date].filter(function(value) {return value !== undefined && value !== null && String(value).trim() !== '';}).map(billDateV81_);
   if (dates.length && dates.some(function(item) {return item.folder !== dates[0].folder;})) throw new Error('Bill dates disagree; no upload performed.');
   var date = dates.length ? dates[0].sheet : '';
@@ -158,27 +130,20 @@ function writeBillReportV81_(data, ss, params) {
   var extension = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif'}[mime];
   var originalName = String(data.file_name || '').trim() || vehicle + '_' + hash.slice(0, 12) + '.' + extension;
   var fileName = originalName.indexOf(hash + '_') === 0 ? originalName : hash + '_' + originalName;
-  var folderName = category === 'FUEL' ? 'Fuel' : 'Maintanence';
-  var metadata = 'Category: ' + category + ' | OCR: ' + (ocrStatus || 'classified') +
-    (engine ? ' | Engine: ' + engine : '') + (confidence ? ' | Confidence: ' + confidence : '') + (reason ? ' | Reason: ' + reason : '');
+  var metadata = 'Direct image upload; no image parsing';
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
     var parent = DriveApp.getFolderById(BILL_IMAGES_FOLDER_ID);
-    var folder = billCategoryFolderV84_(parent, category);
+    var folder = parent;
+    var folderName = parent.getName();
     var sheet = ss.getSheetByName(BILL_LOG_SHEET_NAME);
     if (!sheet) {
       sheet = ss.insertSheet(BILL_LOG_SHEET_NAME);
-      sheet.appendRow(['Date', 'File Name', 'Vehicle', 'Drive Link', 'Original Date', 'Uploaded At', 'Image Hash', 'Bill Category']);
+      sheet.appendRow(['Date', 'File Name', 'Vehicle', 'Drive Link', 'Original Date', 'Uploaded At', 'Image Hash']);
       sheet.setFrozenRows(1);
     }
     var rows = sheet.getDataRange().getValues(), headers = rows[0].slice(), columns = billColumnsV81_(headers);
-    if (columns.bill_category === undefined) {
-      if (headers.length >= sheet.getMaxColumns()) sheet.insertColumnAfter(headers.length);
-      sheet.getRange(1, headers.length + 1).setValue('Bill Category');
-      headers.push('Bill Category');
-      columns = billColumnsV81_(headers);
-    }
     var notes = sheet.getDataRange().getNotes(), matchingRows = [], file = null;
     for (var i = 1; i < rows.length; i++) {
       var existingName = String(rows[i][columns.file_name] || '').trim();
@@ -214,16 +179,16 @@ function writeBillReportV81_(data, ss, params) {
       try {file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);} catch (sharingError) {}
     }
     file.setDescription('Hash: ' + hash + ' | Folder: ' + folderName + ' | ' + metadata);
-    if (!billHasParentV81_(file, folder.getId())) throw new Error('Drive file is not in the requested bill category folder.');
+    if (!billHasParentV81_(file, folder.getId())) throw new Error('Drive file is not in the requested configured Bills folder.');
     var url = file.getUrl();
     if (!url) throw new Error('Drive upload has no URL; no success acknowledged.');
     var values = {date: date ? "'" + date : '', file_name: file.getName(), vehicle: vehicle, drive_link: url,
-      original_date: date, uploaded_at: new Date(), image_hash: hash, date_folder: '', bill_category: category, bill_folder: folderName};
+      original_date: date, uploaded_at: new Date(), image_hash: hash, date_folder: '', bill_category: '', bill_folder: folderName};
     var rowNumber = matchingRows.length ? matchingRows[0] + 1 : sheet.getLastRow() + 1;
     var rowData = headers.map(function(header, index) {
       var field;
       Object.keys(columns).some(function(key) {if (columns[key] === index) {field = key; return true;} return false;});
-      if (matchingRows.length && (field === 'uploaded_at' || (!date && (field === 'date' || field === 'original_date')))) return rows[matchingRows[0]][index] || '';
+      if (matchingRows.length && (field === 'bill_category' || field === 'uploaded_at' || (!date && (field === 'date' || field === 'original_date')))) return rows[matchingRows[0]][index] || '';
       return field ? values[field] : (matchingRows.length ? rows[matchingRows[0]][index] : '');
     });
     ['date', 'original_date', 'vehicle', 'image_hash'].forEach(function(field) {if (columns[field] !== undefined) sheet.getRange(rowNumber, columns[field] + 1).setNumberFormat('@');});
@@ -234,7 +199,7 @@ function writeBillReportV81_(data, ss, params) {
     properties.deleteProperty(pendingKey);
     return jsonResponseWithCallback({success: true, status: reused ? 'duplicate' : 'inserted', duplicate: reused,
       sheet: BILL_LOG_SHEET_NAME, vehicle: vehicle, fileName: file.getName(), driveLink: url, existingUrl: reused ? url : '',
-      date: date, dateFolder: '', billCategory: category, billFolder: folderName, folderId: folder.getId(), fileId: file.getId(),
-      moved: moved, existingRow: rowNumber, v: 'V84 fixed bill category folders'}, params);
+      date: date, dateFolder: '', billUploadMode: 'DIRECT', billFolder: folderName, folderId: folder.getId(), fileId: file.getId(),
+      moved: moved, existingRow: rowNumber, v: 'V84 fixed configured Bills folders'}, params);
   } finally {lock.releaseLock();}
 }
