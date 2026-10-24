@@ -97,7 +97,7 @@ test('complete file contains its modules exactly once', () => {
 test('doPost writes October ID and rejects duplicate without another row', () => {
   const f = fixture(); const result = f.post(sample);
   assert.equal(result.success, true); assert.equal(result.vehicleColumn, 3);
-  assert.equal(result.v, 'V85');
+  assert.equal(result.v, 'V86');
   assert.equal(f.state.sheets.Oct.rows[1][2], '7412');
   assert.equal(f.post(sample).duplicate, true); assert.equal(f.state.sheets.Oct.rows.length, 2);
 });
@@ -144,10 +144,10 @@ test('grouped readings are normalized and absent calculations are computed', () 
 
 test('image bill uploads directly and reuses its link without OCR', () => {
   const f = fixture(); const data = {image_data: Buffer.from('image').toString('base64')};
-  const result = f.post(data); assert.equal(result.success, true); assert.equal(result.billUploadMode, 'DIRECT');
-  assert.equal(result.folderId, 'configured-root'); assert.equal(result.date, ''); assert.ok(result.driveLink);
+  const result = f.post(data); assert.equal(result.success, true); assert.equal(result.billUploadMode, 'FUEL_FOLDER');
+  assert.equal(result.folderId, 'folder_0'); assert.equal(result.date, ''); assert.ok(result.driveLink);
   assert.equal(f.post(data).duplicate, true); assert.equal(f.state.files.length, 1);
-  assert.equal(f.state.sheets['Bill log'].rows.length, 2); assert.equal(f.state.folders.length, 0);
+  assert.equal(f.state.sheets['Bill log'].rows.length, 2); assert.equal(f.state.folders.length, 1);
 });
 test('maintenance text requires no fuel readings, preserves work and deduplicates', () => {
   const f = fixture(); const data = {date: '08/10/26', type: 'MAINTENANCE', vehicle: '7412', bill_amount: '1250', work_details: 'Electric work', message_id: 'maintenance-source'};
@@ -185,7 +185,7 @@ test('date test and JSON POST read actions retain the full year', () => {
   const f = fixture();
   assert.equal(f.get({action: 'test_date', date: '8/10/26'}).folderFull, '08-10-2026');
   assert.equal(f.post({action: 'test_date', date: '8/10/26'}).folderFull, '08-10-2026');
-  assert.equal(f.get({action: 'test_date', date: '8/10/26'}).billUploadMode, 'DIRECT');
+  assert.equal(f.get({action: 'test_date', date: '8/10/26'}).billUploadMode, 'FUEL_FOLDER');
   assert.equal(f.get({action: 'test_date', date: '31/02/26'}).success, false);
 });
 
@@ -202,4 +202,16 @@ test('legacy cleanup functions preview without deleting or relabeling rows', () 
   assert.equal(f.context.cleanupBillLogDuplicates().extraCopies, 0);
   assert.match(f.context.fixFuelShiftForExistingData(), /No existing rows changed/);
   assert.equal(f.state.sheets.Oct.rows.length, 2);
+});
+
+test('editor move preview is read-only and relocation preserves file URL', () => {
+  const f = fixture(); const result = f.post({image_data: Buffer.from('photo').toString('base64')});
+  const file = f.state.files[0]; file.folderId = 'configured-root';
+  file.getParents = () => iter([{getId: () => 'configured-root', getParents: () => iter([])}]);
+  file.getMimeType = () => 'image/png';
+  const preview = f.context.previewLoggedBillsMoveToFuel();
+  assert.equal(preview.candidates.length, 1); assert.equal(file.folderId, 'configured-root');
+  const moved = f.context.moveLoggedBillsToFuel();
+  assert.equal(moved.moved, 1); assert.equal(file.folderId, 'folder_0');
+  assert.equal(file.getUrl(), result.driveLink); assert.equal(f.state.files.length, 1);
 });

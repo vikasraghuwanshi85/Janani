@@ -170,3 +170,59 @@ class WhatsAppDateTests(unittest.TestCase):
         report = app.parse_message(rows[0]['text'], IMAGE, message_date=rows[0]['messageDate'])
         self.assertEqual(report['payload']['date'], '06/10/26')
         self.assertEqual(report['payload']['date_folder'], '')
+
+    def media_fixture(self, inline=False, full=True):
+        self.driver.get('about:blank')
+        return self.driver.execute_async_script('''
+            const done = arguments[arguments.length - 1];
+            const inline = arguments[0], full = arguments[1];
+            let c = document.createElement('canvas'); c.width = 1000; c.height = 600;
+            let ctx = c.getContext('2d');
+            for(let y=0;y<600;y+=4) for(let x=0;x<1000;x+=4) {
+                ctx.fillStyle = `rgb(${(x*37+y*11)%256},${(x*13+y*31)%256},${(x*71+y*7)%256})`;
+                ctx.fillRect(x,y,4,4);
+            }
+            window.originalBill = c.toDataURL('image/png');
+            c.width=80;c.height=60;ctx=c.getContext('2d');ctx.fillStyle='gray';ctx.fillRect(0,0,80,60);
+            document.body.innerHTML='<div id="main"><div data-id="photo"><img id="preview"></div></div>';
+            window.clicked=false;
+            let img=document.querySelector('#preview');
+            img.onclick=()=>{
+                window.clicked=true;
+                let dialog=document.createElement('div');dialog.setAttribute('role','dialog');
+                dialog.innerHTML='<button aria-label="Close">close</button>';
+                dialog.querySelector('button').onclick=()=>dialog.remove();
+                if(full){let big=document.createElement('img');big.src=window.originalBill;dialog.append(big);}
+                document.body.append(dialog);
+            };
+            img.onload=()=>done(window.originalBill);
+            img.src=inline ? window.originalBill : c.toDataURL('image/png');
+        ''', inline, full)
+
+    def read_full_media(self):
+        source = ast.parse((Path(__file__).resolve().parents[1] / 'janani-webhook.py').read_text())
+        script = next(n.args[0].value for n in ast.walk(source)
+                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                      and n.func.attr == 'execute_async_script' and n.args
+                      and isinstance(n.args[0], ast.Constant) and 'BILL_FULL_MEDIA' in str(n.args[0].value))
+        return self.driver.execute_async_script(script, '', False, 'photo')
+
+    def test_viewer_original_bytes_replace_inline_thumbnail(self):
+        original = self.media_fixture()
+        result = self.read_full_media()
+        self.assertTrue(result['image_data'] == original, 'Original image bytes were changed')
+        self.assertEqual((result['width'], result['height']), (1000, 600))
+        self.assertGreater(result['bytes'], 8192)
+        self.assertFalse(self.driver.find_elements('css selector', '[role="dialog"]'))
+
+    def test_full_inline_photo_is_preserved_without_opening_viewer(self):
+        original = self.media_fixture(inline=True)
+        result = self.read_full_media()
+        self.assertTrue(result['image_data'] == original)
+        self.assertFalse(self.driver.execute_script('return window.clicked'))
+
+    def test_small_unavailable_photo_is_not_enlarged_or_returned(self):
+        self.media_fixture(full=False)
+        result = self.read_full_media()
+        self.assertEqual(result['image_data'], '')
+        self.assertFalse(self.driver.find_elements('css selector', '[role="dialog"]'))

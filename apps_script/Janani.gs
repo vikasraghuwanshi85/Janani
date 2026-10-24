@@ -4,13 +4,13 @@
 // This bundle needs no separate helper files, despite component comments below.
 
 /**
- * JANANI FLEET V85 - complete web-app entry points.
+ * JANANI FLEET V86 - complete web-app entry points.
  * Use the generated Janani.gs as the single-file deployment.
  */
 var SHEET_ID = '1ii9MU_bScuYAqtuXGQyKd4QLsgHcwwJJLcfusoo5NWI';
 var BILL_IMAGES_FOLDER_ID = '1fGcvEMxynl9MNsADvpqFQEf1elDbrFgH';
 var BILL_LOG_SHEET_NAME = 'Bill log';
-var JANANI_VERSION = 'V85';
+var JANANI_VERSION = 'V86';
 var JANANI_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 var FUEL_HEADERS_OLD = ['Date', 'Location', 'Vehicle', 'Type', 'Present ODO', 'Previous ODO',
   'Total KM', 'Diesel Amount', 'Diesel Liter', 'Rate', 'Average', 'Bill Amount',
@@ -205,7 +205,7 @@ function doGet(e) {
       var parsed = parseDate(params.date);
       return jsonResponseWithCallback({success: true, v: JANANI_VERSION, folder: parsed.folder,
         folderDashed: parsed.folderFull, folderFull: parsed.folderFull, sheet: BILL_LOG_SHEET_NAME,
-        fuelHeaders: FUEL_HEADERS_OLD, billUploadMode: 'DIRECT', billOcrRequired: false, billsParentId: BILL_IMAGES_FOLDER_ID}, params);
+        fuelHeaders: FUEL_HEADERS_OLD, billUploadMode: 'FUEL_FOLDER', billOcrRequired: false, billsParentId: BILL_IMAGES_FOLDER_ID}, params);
     }
     if (action === 'fix_headers') {
       return jsonResponseWithCallback({success: false, v: JANANI_VERSION,
@@ -591,8 +591,13 @@ function writeBillReportV81_(data, ss, params) {
   lock.waitLock(30000);
   try {
     var parent = DriveApp.getFolderById(BILL_IMAGES_FOLDER_ID);
-    var folder = parent;
-    var folderName = parent.getName();
+    var children = parent.getFoldersByName('Fuel');
+    var folder;
+    if (children.hasNext()) {
+      folder = children.next();
+      if (children.hasNext()) throw new Error('Multiple Fuel folders exist; reconcile before upload.');
+    } else folder = parent.createFolder('Fuel');
+    var folderName = folder.getName();
     var sheet = ss.getSheetByName(BILL_LOG_SHEET_NAME);
     if (!sheet) {
       sheet = ss.insertSheet(BILL_LOG_SHEET_NAME);
@@ -655,7 +660,39 @@ function writeBillReportV81_(data, ss, params) {
     properties.deleteProperty(pendingKey);
     return jsonResponseWithCallback({success: true, status: reused ? 'duplicate' : 'inserted', duplicate: reused,
       sheet: BILL_LOG_SHEET_NAME, vehicle: vehicle, fileName: file.getName(), driveLink: url, existingUrl: reused ? url : '',
-      date: date, dateFolder: '', billUploadMode: 'DIRECT', billFolder: folderName, folderId: folder.getId(), fileId: file.getId(),
-      moved: moved, existingRow: rowNumber, v: 'V84 fixed configured Bills folders'}, params);
+      date: date, dateFolder: '', billUploadMode: 'FUEL_FOLDER', billFolder: folderName, folderId: folder.getId(), fileId: file.getId(),
+      moved: moved, existingRow: rowNumber, v: 'V86 Bills/Fuel original image uploads'}, params);
   } finally {lock.releaseLock();}
+}
+
+// Editor-only helpers for already uploaded bills; never change image bytes/URLs.
+function previewLoggedBillsMoveToFuel() { return moveLoggedBillsToFuel_(false); }
+function moveLoggedBillsToFuel() { return moveLoggedBillsToFuel_(true); }
+function moveLoggedBillsToFuel_(apply) {
+  var lock = LockService.getScriptLock(); lock.waitLock(30000);
+  try {
+    var parent = DriveApp.getFolderById(BILL_IMAGES_FOLDER_ID);
+    var folders = parent.getFoldersByName('Fuel'), destination = folders.hasNext() ? folders.next() : null;
+    if (folders.hasNext()) throw new Error('Multiple Fuel folders exist; reconcile before moving bills.');
+    var sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(BILL_LOG_SHEET_NAME);
+    var result = {preview: !apply, candidates: [], moved: 0, skipped: 0, errors: []}, seen = {};
+    if (!sheet) return result;
+    var rows = sheet.getDataRange().getValues(), columns = billColumnsV81_(rows[0]);
+    for (var i = 1; i < rows.length; i++) {
+      var id = billFileIdV81_(rows[i][columns.drive_link]);
+      if (!id || seen[id]) continue;
+      seen[id] = true;
+      try {
+        var file = DriveApp.getFileById(id);
+        if (!billManagedFileV84_(file, parent.getId()) || !/^image\//.test(file.getMimeType())) { result.skipped++; continue; }
+        if (destination && billHasParentV81_(file, destination.getId())) { result.skipped++; continue; }
+        result.candidates.push({fileId: id, fileName: file.getName(), row: i + 1});
+        if (apply) {
+          if (!destination) destination = parent.createFolder('Fuel');
+          file.moveTo(destination); result.moved++;
+        }
+      } catch (error) { result.errors.push({row: i + 1, error: String(error.message || error)}); }
+    }
+    Logger.log(JSON.stringify(result)); return result;
+  } finally { lock.releaseLock(); }
 }

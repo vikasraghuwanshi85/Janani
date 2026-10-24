@@ -94,8 +94,8 @@ function fixture(options = {}) {
 
 test('uploads directly with URL, no category/OCR/subfolder requirement', () => {
   const f = fixture(); const result = f.write({...payload, bill_category: undefined, ocr_status: 'failed'});
-  assert.equal(result.success, true); assert.equal(result.billUploadMode, 'DIRECT');
-  assert.equal(result.folderId, 'configured-parent'); assert.equal(f.state.folders.length, 0);
+  assert.equal(result.success, true); assert.equal(result.billUploadMode, 'FUEL_FOLDER');
+  assert.equal(result.folderId, 'folder_0'); assert.equal(f.state.folders.length, 1);
   assert.equal(f.state.rows[1][3], result.driveLink); assert.equal(f.state.rows[1][6], hash);
 });
 test('same bytes reuse file and row on repeat', () => {
@@ -104,7 +104,7 @@ test('same bytes reuse file and row on repeat', () => {
 });
 test('missing metadata never fabricates date', () => {
   const f = fixture(); const result = f.write({...payload, date: '', original_date: '', date_folder: 'ignored'});
-  assert.equal(result.date, ''); assert.equal(f.state.rows[1][0], ''); assert.equal(f.state.folders.length, 0);
+  assert.equal(result.date, ''); assert.equal(f.state.rows[1][0], ''); assert.equal(f.state.folders.length, 1);
 });
 test('access and upload failures are not acknowledged', () => {
   for (const options of [{accessError: true}, {uploadError: true}]) {
@@ -147,7 +147,7 @@ test('existing referenced bill in wrong folder is moved and link reused', () => 
 test('different date metadata for same bytes reuses the file without dated folders', () => {
   const f = fixture(); f.write();
   const result = f.write({...payload, date: '06/10/26', original_date: '06/10/26', date_folder: '06-10-2026'});
-  assert.equal(result.dateFolder, ''); assert.equal(result.moved, false); assert.equal(result.billFolder, 'Bills');
+  assert.equal(result.dateFolder, ''); assert.equal(result.moved, false); assert.equal(result.billFolder, 'Fuel');
   assert.equal(f.state.files.length, 1); assert.equal(f.state.rows.length, 2);
 });
 

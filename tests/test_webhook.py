@@ -299,9 +299,9 @@ class WebhookDeploymentTests(unittest.TestCase):
                 app.webhook_json(self.response(body))
 
     def test_read_only_preflight_checks_version_and_folder(self):
-        response = self.response('{"success":true,"v":"V85","billUploadMode":"DIRECT","billOcrRequired":false}')
+        response = self.response('{"success":true,"v":"V86","billUploadMode":"FUEL_FOLDER","billOcrRequired":false}')
         with patch.object(app.requests, 'get', return_value=response) as get, patch.object(app.requests, 'post') as post, patch('builtins.print'):
-            self.assertEqual(app.check_webhook()['v'], 'V85')
+            self.assertEqual(app.check_webhook()['v'], 'V86')
         self.assertEqual(get.call_args.kwargs['params'], {'action': 'test_date', 'date': '09/10/26'})
         post.assert_not_called()
 

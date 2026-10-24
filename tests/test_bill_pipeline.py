@@ -49,7 +49,7 @@ class BillPipelineTests(unittest.TestCase):
                          check_webhook=lambda: None, read_last_n_days=lambda **kwargs: ([entry], history),
                          acquire_push_lock=lambda: Mock(), save_history=Mock())
         response = response or {'success': True, 'driveLink': 'https://drive.google.com/file/d/id/view',
-                                'fileId': 'id', 'folderId': 'bills-root', 'billUploadMode': 'DIRECT', 'sheet': 'Bill log'}
+                                'fileId': 'id', 'folderId': 'bills-root', 'billUploadMode': 'FUEL_FOLDER', 'billFolder': 'Fuel', 'sheet': 'Bill log'}
         main = next(node for node in ast.parse(SOURCE.read_text()).body
                     if isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
                     and any(isinstance(value, ast.Constant) and value.value == '__main__' for value in node.test.comparators))

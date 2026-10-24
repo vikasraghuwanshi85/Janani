@@ -1,6 +1,6 @@
 """
-JANANI FLEET - V85 - FUEL + MAINTENANCE REPORTS + DEBUG MODE
-- New fuel entry not pushing? V85 shows WHY
+JANANI FLEET - V86 - FUEL + MAINTENANCE REPORTS + DEBUG MODE
+- New fuel entry not pushing? V86 shows WHY
 - Added --force flag to force push even if in history
 - Added detailed fuel debug logging
 - Fixed fuel parsing edge cases
@@ -14,7 +14,7 @@ python janani-webhook.py --days 1 --force --debug-fuel
 
 Bills always respect push history, including with --force. Bill dates come from
 the caption or WhatsApp metadata; undated bill dates remain blank.
-Images upload directly to Bills without parsing. Maintenance data comes from WhatsApp text.
+Images upload to Bills/Fuel without parsing their contents. Maintenance data comes from WhatsApp text.
 """
 
 import os, re, time, requests, json, hashlib, sys, io, platform, base64, tempfile, shutil, unicodedata, math
@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
-PYTHON_BUILD = '2026-10-24.5'
+PYTHON_BUILD = '2026-10-24.6'
 
 class WebhookProtocolError(RuntimeError):
     """The deployment did not return the JSON contract required for uploads."""
@@ -125,10 +125,10 @@ def check_webhook():
     if result.get('success') is False:
         raise WebhookProtocolError('Deployment check failed: ' + str(result.get('error', 'unknown Apps Script error')))
     version = re.match(r'^V(\d+)\b', str(result.get('v', '')))
-    expected_mode = 'DIRECT'
-    if not version or int(version.group(1)) < 85 or result.get('billUploadMode') != expected_mode or result.get('billOcrRequired') is not False:
-        raise WebhookProtocolError('The URL is not serving V85 (or newer) with direct bill uploads and OCR disabled. Save the complete Janani.gs, then Deploy > Manage deployments > Edit > New version > Deploy.')
-    print('[CHECK] Webhook ' + str(result['v']) + ': JSON response and direct bill upload check passed')
+    expected_mode = 'FUEL_FOLDER'
+    if not version or int(version.group(1)) < 86 or result.get('billUploadMode') != expected_mode or result.get('billOcrRequired') is not False:
+        raise WebhookProtocolError('The URL is not serving V86 (or newer) with Bills/Fuel uploads and OCR disabled. Save the complete Janani.gs, then Deploy > Manage deployments > Edit > New version > Deploy.')
+    print('[CHECK] Webhook ' + str(result['v']) + ': JSON response and Bills/Fuel upload check passed')
     return result
 
 def detect_windows():
@@ -565,7 +565,7 @@ def message_scan_date(item):
     return max(dates) if dates else None
 
 def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug=False, message_date=""):
-    """V85 with debug reason why fuel not parsed"""
+    """V86 with debug reason why fuel not parsed"""
     check_text = original_text_for_vehicle or text
     if text in ['[IMAGE_ONLY_BILL]', '[FORWARDED_BILL_IMAGE]']:
         check_text = original_text_for_vehicle or ""
@@ -859,7 +859,7 @@ def get_chrome_options_universal(profile_path=None):
 
 def create_driver_universal(profile_path=None):
     print("="*60)
-    print(f"JANANI V85 FUEL + MAINTENANCE REPORTS - {DAYS_TO_SCAN} Days")
+    print(f"JANANI V86 FUEL + MAINTENANCE REPORTS - {DAYS_TO_SCAN} Days")
     print("Feature: Debug fuel parsing + --force flag")
     print("="*60)
     from selenium import webdriver
@@ -1262,72 +1262,90 @@ def scroll_and_collect_with_image_fix(driver, days=30):
                         if has_img:
                             image_attempts[h] = image_attempts.get(h, 0) + 1
                             try:
-                                b64 = driver.execute_async_script("""
-                                    const callback = arguments[arguments.length - 1];
-                                    const searchText = arguments[0];
-                                    const messageId = arguments[2];
-                                    (async () => {
-                                        try {
-                                            const selectors = ['div[data-testid="msg-container"]','div[data-id]','div.message-in','div.message-out','div[role="row"]'];
-                                            let nodes = [];
-                                            for(let sel of selectors){ let found = document.querySelectorAll(sel); if(found.length > nodes.length) nodes = found; }
-                                            let targetNode = null;
-                                            if(messageId){
-                                                targetNode = Array.from(document.querySelectorAll('[data-id]')).find(n => n.getAttribute('data-id') === messageId);
-                                            } else {
-                                                let matches = Array.from(nodes).filter(n => (n.innerText || '').trim() === searchText);
-                                                if(matches.length === 1) targetNode = matches[0];
-                                            }
-                                            if(targetNode){
-                                                targetNode.scrollIntoView({behavior: 'smooth', block: 'center'});
-                                                await new Promise(r => setTimeout(r, 800));
-                                                let imgs = Array.from(targetNode.querySelectorAll('img'));
-                                                let sorted = imgs.filter(img => {
-                                                    let src = img.src || '';
-                                                    return !(src.includes('avatar') || src.includes('pps') || src.includes('sticker'));
-                                                }).sort((a,b) => (b.naturalWidth*b.naturalHeight) - (a.naturalWidth*a.naturalHeight));
-                                                for(let img of sorted){
-                                                    let src = img.src || '';
-                                                    if(src.startsWith('blob:') || src.startsWith('data:image/')){
-                                                        try{
-                                                            let resp = await fetch(src);
-                                                            if(!resp.ok) continue;
-                                                            let blob = await resp.blob();
-                                                            let reader = new FileReader();
-                                                            reader.onloadend = () => {
-                                                                let legacyData = '';
-                                                                try {
-                                                                    let canvas = document.createElement('canvas');
-                                                                    canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
-                                                                    canvas.getContext('2d').drawImage(img, 0, 0);
-                                                                    legacyData = canvas.toDataURL('image/jpeg', 0.8);
-                                                                } catch(e) {}
-                                                                callback({image_data: reader.result, legacy_image_data: legacyData});
-                                                            };
-                                                            reader.readAsDataURL(blob);
-                                                            return;
-                                                        }catch(e){}
-                                                    }
-                                                }
-                                                for(let img of sorted){
-                                                    if(img.naturalWidth >= 100 && img.naturalHeight >= 100){
-                                                        try{
-                                                            let canvas = document.createElement('canvas');
-                                                            let ctx = canvas.getContext('2d');
-                                                            canvas.width = img.naturalWidth;
-                                                            canvas.height = img.naturalHeight;
-                                                            ctx.drawImage(img, 0, 0);
-                                                            let data = canvas.toDataURL('image/jpeg', 0.8);
-                                                            if(data && data.length > 5000){ callback(data); return; }
-                                                        }catch(e){}
-                                                    }
-                                                }
-                                            }
-                                            callback("");
-                                        } catch(e){ callback(""); }
-                                    })();
-                                """, txt, msg.get('isForwarded', False), msg.get('messageId', ''))
+                                b64 = driver.execute_async_script(r"""
+const callback = arguments[arguments.length - 1];
+const searchText = arguments[0], messageId = arguments[2];
+// BILL_FULL_MEDIA: preserve downloaded bytes; never upscale/recompress a preview.
+(async () => {
+    let viewer = null, scroll = null, top = null, answer = {image_data: '', error: 'Full-size bill photo is not downloaded'};
+    const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const excluded = img => /avatar|pps\.whatsapp|sticker|emoji/i.test(img.currentSrc || img.src || '');
+    async function readOriginal(img) {
+        if (excluded(img) || Math.min(img.naturalWidth, img.naturalHeight) < 300 || Math.max(img.naturalWidth, img.naturalHeight) < 800) return null;
+        const src = img.currentSrc || img.src || '';
+        if (!/^(blob:|data:image\/|https?:)/i.test(src)) return null;
+        const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 2500);
+        try {
+            const response = await fetch(src, {signal: controller.signal});
+            if (!response.ok) return null;
+            const blob = await response.blob();
+            if (blob.size < 8192 || !/^image\/(jpeg|png|webp|gif)$/i.test(blob.type)) return null;
+            const data = await new Promise((resolve, reject) => {
+                const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob);
+            });
+            return {image_data: data, width: img.naturalWidth, height: img.naturalHeight, bytes: blob.size};
+        } catch (_) { return null; } finally { clearTimeout(timer); }
+    }
+    try {
+        const main = document.querySelector('#main') || document.querySelector('[data-testid="conversation-panel-messages"]');
+        if (!main) throw Error('Conversation pane missing');
+        let target;
+        if (messageId) target = Array.from(main.querySelectorAll('[data-id]')).find(n => n.getAttribute('data-id') === messageId);
+        else {
+            const matches = Array.from(main.querySelectorAll('[data-testid="msg-container"], .message-in, .message-out')).filter(n => (n.innerText || '').trim() === searchText);
+            if (matches.length === 1) target = matches[0];
+        }
+        if (!target) throw Error('Source image message is no longer visible');
+        for (let n = target.parentElement; n; n = n.parentElement) {
+            if (n.scrollHeight > n.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(n).overflowY)) { scroll = n; top = n.scrollTop; break; }
+            if (n === main) break;
+        }
+        const thumbs = Array.from(target.querySelectorAll('img')).filter(img => !excluded(img)).sort((a,b) => b.naturalWidth*b.naturalHeight - a.naturalWidth*a.naturalHeight);
+        for (const img of thumbs) { const result = await readOriginal(img); if (result) { answer = result; break; } }
+        if (!answer.image_data) {
+            const alreadyOpen = document.querySelector('[data-testid="media-viewer"], [data-testid="media-viewer-modal"], [data-animate-media-viewer], [role="dialog"]');
+            if (alreadyOpen && alreadyOpen.getBoundingClientRect().width > 0) throw Error('Close the existing media viewer before retrying this photo');
+            const thumb = thumbs.find(img => img.getBoundingClientRect().width > 0);
+            if (!thumb) throw Error('No clickable bill photo');
+            const existing = new Set(document.querySelectorAll('img'));
+            thumb.click();
+            const deadline = Date.now() + 10000;
+            const tried = new Set();
+            while (Date.now() < deadline) {
+                viewer = document.querySelector('[data-testid="media-viewer"], [data-testid="media-viewer-modal"], [data-animate-media-viewer], [role="dialog"]');
+                let images = Array.from((viewer || document).querySelectorAll('img'));
+                images = images.filter(img => !target.contains(img) && !img.closest('#side') && (viewer || (!img.closest('#main') && !existing.has(img))));
+                images.sort((a,b) => b.naturalWidth*b.naturalHeight - a.naturalWidth*a.naturalHeight);
+                for (const img of images) {
+                    const key = (img.currentSrc || img.src) + ':' + img.naturalWidth + ':' + img.naturalHeight;
+                    if (tried.has(key)) continue;
+                    if (!img.complete || !img.naturalWidth) continue;
+                    tried.add(key);
+                    const result = await readOriginal(img);
+                    if (result) { answer = result; break; }
+                }
+                if (answer.image_data) break;
+                await pause(350);
+            }
+        }
+    } catch (error) { answer.error = error.message; }
+    finally {
+        try { if (viewer) {
+            const close = viewer.querySelector('[data-testid="media-viewer-close"], [aria-label="Close"], [data-icon="x-viewer"]');
+            if (close) (close.closest('button, [role="button"]') || close).click();
+            else document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', code:'Escape', keyCode:27, bubbles:true}));
+            await pause(200);
+        } } catch (_) {}
+        if (scroll && top !== null && scroll.isConnected) scroll.scrollTop = top;
+        callback(answer);
+    }
+})();
+""", txt, msg.get('isForwarded', False), msg.get('messageId', ''))
                                 if isinstance(b64, dict):
+                                    if not b64.get('image_data'):
+                                        print('[IMAGE RETRY] ' + str(b64.get('error', 'Waiting for the original bill photo')))
+                                    else:
+                                        print(f"[IMAGE] Original bytes: {b64.get('bytes', '?')}; dimensions: {b64.get('width', '?')}x{b64.get('height', '?')}")
                                     legacy_data = b64.get("legacy_image_data", "")
                                     if legacy_data:
                                         legacy_image_hash = hashlib.md5(legacy_data.encode("utf-8")).hexdigest()[:20]
@@ -1418,7 +1436,7 @@ def read_last_n_days(days=30):
     if not SELENIUM_AVAILABLE:
         print("[ERROR] Selenium not installed")
         return [], set()
-    print(f"Platform: {platform.platform()} | Scanning {days} days - V85")
+    print(f"Platform: {platform.platform()} | Scanning {days} days - V86")
     cutoff_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1) if days < 3650 else datetime(2000, 1, 1)
     print(f"[INFO] Cutoff: {cutoff_date.strftime('%d/%m/%y')}")
     try:
@@ -1513,7 +1531,7 @@ def read_last_n_days(days=30):
         parsed.sort(key=lambda x: x.get('date_obj') or datetime.min, reverse=True)
         fuel = sum(1 for e in parsed if e.get('type') == 'FUEL')
         maint = sum(1 for e in parsed if e.get('type') == 'MAINTENANCE')
-        print(f"[INFO] V85 - Fuel: {fuel}, Bills: {maint}, History: {len(history)}")
+        print(f"[INFO] V86 - Fuel: {fuel}, Bills: {maint}, History: {len(history)}")
         
         deduped = {}
         for entry in parsed:
@@ -1552,7 +1570,7 @@ if __name__ == "__main__":
     if '--check-webhook' in sys.argv:
         sys.exit(0)
     print("="*60)
-    print(f"JANANI V85 FUEL + MAINTENANCE REPORTS - {DAYS_TO_SCAN} Days")
+    print(f"JANANI V86 FUEL + MAINTENANCE REPORTS - {DAYS_TO_SCAN} Days")
     print(f"Force: {FORCE_PUSH} | Debug Fuel: {DEBUG_FUEL}")
     print("="*60)
     push_lock = acquire_push_lock()
@@ -1605,9 +1623,9 @@ if __name__ == "__main__":
                 print(f"  -> {json.dumps(j, ensure_ascii=False)[:800]}")
                 if j.get("success") is True or j.get("duplicate") is True:
                     if payload.get('has_image') and (not all(j.get(field) for field in ('driveLink', 'fileId', 'folderId'))
-                            or j.get('billUploadMode') != 'DIRECT'):
+                            or j.get('billUploadMode') != 'FUEL_FOLDER' or j.get('billFolder') != 'Fuel'):
                         failed_pushes += 1
-                        print('  -> [FAIL] Bill response did not confirm its Drive URL and direct upload mode; history not updated')
+                        print('  -> [FAIL] Bill response did not confirm its Drive URL and Bills/Fuel destination; history not updated')
                         continue
                     history.update(bill_history_keys(e))
                     save_history(history)

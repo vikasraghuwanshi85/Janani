@@ -1,4 +1,4 @@
-Use the complete [Janani V85 bundle](Janani.gs) and [deployment instructions](DEPLOY_COMPLETE.md). Images upload directly to Bills with no OCR. Maintenance values come from WhatsApp text and populate monthly sheets. The older modular notes below explain header compatibility only.
+Use the complete [Janani V86 bundle](Janani.gs) and [deployment instructions](DEPLOY_COMPLETE.md). Images upload directly to Bills/Fuel with no OCR. Maintenance values come from WhatsApp text and populate monthly sheets. The older modular notes below explain header compatibility only.
 
 Use [the complete single-file script](Janani.gs) with [full replacement instructions](DEPLOY_COMPLETE.md) if you want all fixes together. The modular installation below remains available for an existing project.
 

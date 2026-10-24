@@ -86,7 +86,7 @@ The supplied V79 Apps Script only maps a header called `Vehicle`, while October 
 
 ## Bill images and maintenance messages
 
-All bill images upload directly into the existing **Janani Reporting → Bills** folder. There is no OCR, image classification, image-number extraction, or new subfolder creation. Pillow, Tesseract and Google Vision are not required. Each successful upload records a Drive URL and image checksum in Bill log. SHA-256, history and server retry checks prevent copying an identical image again; incomplete creation is reconciled before another create. Existing category/date folders and acknowledged images are not reorganized automatically.
+All bill images upload into **Janani Reporting → Bills → Fuel**. There is no OCR, image classification, image-number extraction, or date subfolder creation. Pillow, Tesseract and Google Vision are not required. Each successful upload records a Drive URL and image checksum in Bill log. SHA-256, history and server retry checks prevent copying an identical image again; incomplete creation is reconciled before another create. Existing category/date folders and acknowledged images are not reorganized automatically.
 
 Maintenance data comes from WhatsApp text such as:
 
@@ -110,7 +110,7 @@ The default scan remains 15 days. Keep `pushed_history.json`; previously held im
 
 ## Logs and troubleshooting
 
-Run `run_daily.bat --check-webhook` to test the configured URL without opening WhatsApp or sending any fuel reports or bill images. It requires the complete V85 or newer Apps Script and verifies its direct image-upload mode. Every normal run performs this check first. See [complete deployment instructions](apps_script/DEPLOY_COMPLETE.md) for replacing the script and publishing a new deployment version. The check verifies the HTTP handler, not spreadsheet/Drive permissions; successful uploads verify those separately.
+Run `run_daily.bat --check-webhook` to test the configured URL without opening WhatsApp or sending any fuel reports or bill images. It requires the complete V86 or newer Apps Script and verifies its Bills/Fuel image-upload mode. Every normal run performs this check first. See [complete deployment instructions](apps_script/DEPLOY_COMPLETE.md) for replacing the script and publishing a new deployment version. The check verifies the HTTP handler, not spreadsheet/Drive permissions; successful uploads verify those separately.
 
 | Symptom | Check |
 | --- | --- |
@@ -128,7 +128,7 @@ Run `run_daily.bat --check-webhook` to test the configured URL without opening W
 
 Do not delete push history, remove browser profile locks, or use `--force` as a general repair. Confirm the cause first. `daily_log.txt` grows as runs append output; archive it periodically if needed.
 
-Each run now logs `[BUILD]`, `[SCRIPT]`, `[PYTHON]`, and `[PROFILE]` before its checks. Build `2026-10-24.5` includes bounded scrolling, startup diagnostics, filtering before validation, separate OCR/upload result counts, and numeric labels touching their values (for example Previous odo331215). If that build is absent, or `[SCRIPT]` points elsewhere, the BAT/task is using an older copy. ChromeDriver warning/error diagnostics append to `chromedriver.log`; they provide startup detail without verbose command/image logging.
+Each run now logs `[BUILD]`, `[SCRIPT]`, `[PYTHON]`, and `[PROFILE]` before its checks. Build `2026-10-24.6` includes bounded scrolling, startup diagnostics, filtering before validation, separate OCR/upload result counts, and numeric labels touching their values (for example Previous odo331215). If that build is absent, or `[SCRIPT]` points elsewhere, the BAT/task is using an older copy. ChromeDriver warning/error diagnostics append to `chromedriver.log`; they provide startup detail without verbose command/image logging.
 
 After updating the Python file, compare these browser-only checks from the project folder:
 
@@ -158,3 +158,5 @@ pwsh -NoProfile -File tests/test_bootstrap_windows.ps1
 ```
 
 It checks PowerShell parsing, first-time setup, cached reuse, embedded module paths, and failed-download handling. It does not execute Windows binaries or validate the BAT on Windows. The official Python and paired Windows browser/driver download URLs were also checked for availability.
+
+Full-size photo capture (build 2026-10-24.6) uses the inline original when available, otherwise opens WhatsApp's media viewer and waits for the loaded photo. It requires at least an 800-pixel long edge, a 300-pixel short edge, and 8 KB of downloaded bytes to avoid tiny blur previews. Smaller/unavailable images are deferred rather than enlarged. Original bytes and MIME type are preserved; no canvas JPEG compression or OCR is used. This cannot restore detail missing from the sender's original. Existing acknowledged thumbnails remain protected by history and need reviewed replacement from original photos; an update does not convert them into high-resolution files.
