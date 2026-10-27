@@ -27,7 +27,7 @@ goto finished
 >>"daily_log.txt" echo Using Python: "%JANANI_PYTHON%"
 "%JANANI_PYTHON%" -c "import sys, requests, selenium; sys.exit(0 if sys.version_info >= (3,8) else 1)" >>"daily_log.txt" 2>&1
 if errorlevel 1 goto missing_packages
-"%JANANI_PYTHON%" -u "janani-webhook.py" --days 15 --debug --debug-fuel %* >>"daily_log.txt" 2>&1
+"%JANANI_PYTHON%" -u "janani-webhook.py" --debug --debug-fuel %* >>"daily_log.txt" 2>&1
 set "JANANI_EXIT=%errorlevel%"
 goto finished
 :missing_packages
