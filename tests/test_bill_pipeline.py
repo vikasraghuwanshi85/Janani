@@ -122,3 +122,19 @@ class BillPipelineTests(unittest.TestCase):
         self.assertFalse(app.already_pushed(second, app.bill_history_keys(first)))
         self.assertTrue(app.already_pushed(first, app.bill_history_keys(first)))
         self.assertTrue(app.already_pushed(first, {first['legacy_maintenance_key']}))
+
+    def test_acknowledged_image_does_not_hide_new_maintenance_caption(self):
+        text = 'Mntc MSG-\nDate-13/10/26\nVehicle no-7485\nBill amount-350\nWork details-Electric work'
+        reports = self.read_fixture({'attached': {'text': text, 'has_image': True,
+            'image_already_pushed': True, 'image_data': '',
+            'message_date': '13/10/2026', 'message_id': 'attached'}})
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0]['payload']['target_sheet'], 'Oct')
+        self.assertEqual(reports.scan_issues, [])
+
+    def test_acknowledged_photo_without_report_does_not_require_download(self):
+        reports = self.read_fixture({'attached': {'text': 'Bill attachment', 'has_image': True,
+            'image_already_pushed': True, 'image_data': '',
+            'message_date': '13/10/2026', 'message_id': 'attached'}})
+        self.assertEqual(reports, [])
+        self.assertEqual(reports.scan_issues, [])

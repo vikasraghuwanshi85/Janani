@@ -147,6 +147,8 @@ Build `2026-10-27.1` logs `[HISTORY SKIP]` with each skipped record's complete k
 
 Build `2026-10-27.2` supports reversed WhatsApp message lists (negative scroll positions), selects the messages' scroll ancestor before surrounding panels, and makes `--debug` enable fuel diagnostics as well as `[SCROLL]` position logs. Run `py janani-webhook.py --all --debug` for a history diagnostic. Reaching the edge of loaded messages alone cannot prove that WhatsApp supplied all earlier history; it now reports an incomplete scan and exits with code 1, retaining collected reports and acknowledgement history. A daily scan can confirm completion after passing its date boundary. Open the group and load older messages in the Janani Chrome session before retrying if WhatsApp does not load them automatically. An all-history run can conservatively report incomplete even at the real beginning because that boundary cannot be verified from scroll position alone.
 
+Build `2026-10-27.3` reads acknowledgement history before collecting images. `[BILL HISTORY SKIP]` means that exact WhatsApp message ID was already acknowledged and its image was never opened, even with `--force`. Text captions remain eligible for separate report validation. Recognised WhatsApp missing/download-unavailable dialogs are dismissed; that image is deferred for the rest of the run without being marked uploaded. Other transient image failures keep their bounded retry limit. Legacy history containing only image hashes cannot identify an attachment before downloading its bytes; missing originals still require the sender to resend them. Keep `pushed_history.json` so message-ID skips continue to work. No Apps Script redeployment is required for this Python update.
+
 ## Development checks
 
 ```bat

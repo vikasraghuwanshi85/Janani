@@ -258,3 +258,18 @@ class WhatsAppDateTests(unittest.TestCase):
         self.assertEqual(newest['viewport'], 200)
         self.assertEqual(newest['top'], 1800)
         self.assertEqual(self.driver.execute_script("return document.querySelector('#main').scrollTop"), 0)
+
+    def test_deleted_media_popup_is_dismissed_without_waiting_for_image(self):
+        self.media_fixture(full=False)
+        self.driver.execute_script("""
+            document.querySelector('#main img').onclick = () => {
+                const popup = document.createElement('div'); popup.setAttribute('role','alertdialog');
+                popup.innerHTML = "Couldn't download image. Please ask that it be resent to you.<button>OK</button>";
+                popup.querySelector('button').onclick = () => popup.remove();
+                document.body.appendChild(popup);
+            };
+        """)
+        result = self.read_full_media()
+        self.assertTrue(result['unavailable'])
+        self.assertEqual(result['image_data'], '')
+        self.assertFalse(self.driver.find_elements('css selector', '[role="alertdialog"]'))

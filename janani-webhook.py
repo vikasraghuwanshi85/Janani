@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
-PYTHON_BUILD = '2026-10-27.2'
+PYTHON_BUILD = '2026-10-27.3'
 
 class WebhookProtocolError(RuntimeError):
     """The deployment did not return the JSON contract required for uploads."""
@@ -1111,7 +1111,8 @@ def move_whatsapp_history(driver, direction='older'):
             atTop: Math.abs(top - oldest) <= 1};
     """, direction)
 
-def scroll_and_collect_with_image_fix(driver, days=30):
+def scroll_and_collect_with_image_fix(driver, days=30, history=None):
+    history = history if history is not None else set()
     max_scrolls = max(200, days * 12)
     if days >= 3650: max_scrolls = 3000
     print(f"[INFO] Collecting - {days} days, max scrolls {max_scrolls}")
@@ -1289,11 +1290,14 @@ def scroll_and_collect_with_image_fix(driver, days=30):
                     if h in collected and not collected[h].get("message_date") and msg.get("messageDate"):
                         collected[h]["message_date"] = msg["messageDate"]
                     is_new_message = h not in collected
-                    retry_image = has_img and not collected.get(h, {}).get('image_data') and image_attempts.get(h, 0) < max_image_attempts
+                    image_pushed = bool(has_img and msg.get('messageId') and 'bill_message_' + msg['messageId'] in history)
+                    retry_image = has_img and not image_pushed and not collected.get(h, {}).get('image_data') and image_attempts.get(h, 0) < max_image_attempts
                     if is_new_message or retry_image:
                         image_data = ""
                         legacy_image_hash = ""
-                        if has_img:
+                        if image_pushed:
+                            print('[BILL HISTORY SKIP] Already acknowledged; image not opened: ' + msg['messageId'])
+                        if has_img and not image_pushed:
                             image_attempts[h] = image_attempts.get(h, 0) + 1
                             try:
                                 b64 = driver.execute_async_script(r"""
@@ -1304,6 +1308,20 @@ const searchText = arguments[0], messageId = arguments[2];
     let viewer = null, scroll = null, top = null, answer = {image_data: '', error: 'Full-size bill photo is not downloaded'};
     const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
     const excluded = img => /avatar|pps\.whatsapp|sticker|emoji/i.test(img.currentSrc || img.src || '');
+    function dismissUnavailable() {
+        for (const dialog of document.querySelectorAll('[role="dialog"], [role="alertdialog"]')) {
+            if (!dialog.getBoundingClientRect().width) continue;
+            if (!/(?:couldn['’]?t|cannot|can't|unable to) download|(?:image|photo|media|file).{0,60}(?:not found|unavailable|no longer available|deleted)|ask.{0,50}(?:resend|re.?sent)/i.test(dialog.innerText || '')) continue;
+            const buttons = Array.from(dialog.querySelectorAll('button, [role="button"]'));
+            const close = buttons.find(button => /^(?:ok|okay|close|dismiss|ठीक है|बंद करें)$/i.test((button.innerText || button.getAttribute('aria-label') || '').trim()));
+            if (close) close.click();
+            else document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', code:'Escape', keyCode:27, bubbles:true}));
+            answer = {image_data:'', unavailable:true, error:'WhatsApp original image is unavailable; popup dismissed, deferred until next run'};
+            return true;
+        }
+        return false;
+    }
+
     async function readOriginal(img) {
         if (excluded(img) || Math.min(img.naturalWidth, img.naturalHeight) < 300 || Math.max(img.naturalWidth, img.naturalHeight) < 800) return null;
         const src = img.currentSrc || img.src || '';
@@ -1321,6 +1339,7 @@ const searchText = arguments[0], messageId = arguments[2];
         } catch (_) { return null; } finally { clearTimeout(timer); }
     }
     try {
+        if (dismissUnavailable()) return;
         const main = document.querySelector('#main') || document.querySelector('[data-testid="conversation-panel-messages"]');
         if (!main) throw Error('Conversation pane missing');
         let target;
@@ -1346,6 +1365,7 @@ const searchText = arguments[0], messageId = arguments[2];
             const deadline = Date.now() + 10000;
             const tried = new Set();
             while (Date.now() < deadline) {
+                if (dismissUnavailable()) break;
                 viewer = document.querySelector('[data-testid="media-viewer"], [data-testid="media-viewer-modal"], [data-animate-media-viewer], [role="dialog"]');
                 let images = Array.from((viewer || document).querySelectorAll('img'));
                 images = images.filter(img => !target.contains(img) && !img.closest('#side') && (viewer || (!img.closest('#main') && !existing.has(img))));
@@ -1376,6 +1396,8 @@ const searchText = arguments[0], messageId = arguments[2];
 })();
 """, txt, msg.get('isForwarded', False), msg.get('messageId', ''))
                                 if isinstance(b64, dict):
+                                    if b64.get('unavailable'):
+                                        image_attempts[h] = max_image_attempts
                                     if not b64.get('image_data'):
                                         print('[IMAGE RETRY] ' + str(b64.get('error', 'Waiting for the original bill photo')))
                                     else:
@@ -1388,14 +1410,14 @@ const searchText = arguments[0], messageId = arguments[2];
                             except Exception as error:
                                 if browser_session_lost(error):
                                     raise
-                        collected[h] = {"text": txt, "image_data": image_data, "has_image": has_img, "message_date": msg.get("messageDate", ""), "message_id": msg.get("messageId", ""), "legacy_image_hash": legacy_image_hash}
+                        collected[h] = {"text": txt, "image_data": image_data, "has_image": has_img, "image_already_pushed": image_pushed, "message_date": msg.get("messageDate", ""), "message_id": msg.get("messageId", ""), "legacy_image_hash": legacy_image_hash}
                         if is_new_message:
                             found_in_this_scroll += 1
                         if image_data:
                             images_loaded_in_scroll += 1
-                        elif has_img and image_attempts[h] >= max_image_attempts and h not in exhausted_images:
+                        elif has_img and not image_pushed and image_attempts[h] >= max_image_attempts and h not in exhausted_images:
                             exhausted_images.add(h)
-                            print(f'[WARN] Bill image unavailable after {max_image_attempts} attempts; deferred until the next run: {msg.get("messageId") or h}')
+                            print(f'[WARN] Bill image unavailable; deferred until the next run: {msg.get("messageId") or h}')
             
             print(f"  Scroll {i}: Found {found_in_this_scroll} new messages (total {len(collected)})")
             if images_loaded_in_scroll:
@@ -1493,8 +1515,8 @@ def read_last_n_days(days=30):
             return [], set()
         time.sleep(6 if IS_WIN8_FAMILY else 4)
         
-        collected_dict = scroll_and_collect_with_image_fix(driver, days=days)
         history = load_history()
+        collected_dict = scroll_and_collect_with_image_fix(driver, days=days, history=history)
         parsed = []
         scan_issues = list(getattr(collected_dict, 'scan_issues', []))
         if getattr(collected_dict, 'scan_incomplete', False) and not scan_issues:
@@ -1511,10 +1533,13 @@ def read_last_n_days(days=30):
                         print(f'  [FILTERED BY DATE] WhatsApp report {item.get("message_id") or h}: {window_date.strftime("%d/%m/%y")} < cutoff {cutoff_date.strftime("%d/%m/%y")}')
                     continue
             if item.get('has_image') and not img_data:
-                issue = 'Bill image could not be downloaded from WhatsApp; retry after it loads: ' + message_reference(item, h)
-                print('[SKIP] ' + issue)
-                scan_issues.append(issue)
-                continue
+                if not item.get('image_already_pushed'):
+                    issue = 'Bill image could not be downloaded from WhatsApp; retry after it loads: ' + message_reference(item, h)
+                    print('[SKIP] ' + issue)
+                    scan_issues.append(issue)
+                # Acknowledging/losing the photo must not hide its text report.
+                if not any(get_field(field, txt, strict=True) for field in ('Present odo', 'Previous odo', 'Bill amount', 'Work details')):
+                    continue
             if not txt and not img_data: continue
             if len(txt) < 3 and not img_data: continue
             

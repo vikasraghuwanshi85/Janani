@@ -18,7 +18,7 @@ def message(identifier='bill-1', date='24/10/2026', image=True):
 
 
 class ScanProgressTests(TestCase):
-    def collect(self, batches, image_results=('', '', ''), progress=None, days=15):
+    def collect(self, batches, image_results=('', '', ''), progress=None, days=15, history=None):
         driver = Mock()
         batch_index = 0
 
@@ -34,7 +34,7 @@ class ScanProgressTests(TestCase):
         with patch.object(app, 'move_whatsapp_history', return_value=progress), \
                 patch.object(app.time, 'sleep'), patch.object(app, 'datetime', FixedClock), \
                 patch('builtins.print') as output:
-            collected = app.scroll_and_collect_with_image_fix(driver, days=days)
+            collected = app.scroll_and_collect_with_image_fix(driver, days=days, history=history)
         return collected, driver, output
 
     def test_missing_image_retries_do_not_count_as_new_messages_or_block_end(self):
@@ -121,3 +121,16 @@ class ScanProgressTests(TestCase):
         collected, driver, _ = self.collect([[message(image=False)]], days=3650)
         self.assertTrue(collected.scan_incomplete)
         self.assertTrue(any('edge of the loaded' in issue for issue in collected.scan_issues))
+
+    def test_acknowledged_bill_is_never_opened_or_retried(self):
+        collected, driver, output = self.collect([[message()]], history={'bill_message_bill-1'})
+        driver.execute_async_script.assert_not_called()
+        self.assertTrue(collected['bill-1']['image_already_pushed'])
+        self.assertEqual(collected['bill-1']['image_data'], '')
+        lines = [str(call.args[0]) for call in output.call_args_list if call.args]
+        self.assertEqual(sum('[BILL HISTORY SKIP]' in line for line in lines), 1)
+
+    def test_explicit_unavailable_popup_is_not_reopened_in_same_run(self):
+        collected, driver, _ = self.collect([[message()]], ({'image_data': '', 'unavailable': True},))
+        driver.execute_async_script.assert_called_once()
+        self.assertFalse(collected['bill-1'].get('image_already_pushed'))
