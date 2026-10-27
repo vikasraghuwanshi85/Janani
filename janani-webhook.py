@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
-PYTHON_BUILD = '2026-10-27.3'
+PYTHON_BUILD = '2026-10-27.4'
 
 class WebhookProtocolError(RuntimeError):
     """The deployment did not return the JSON contract required for uploads."""
@@ -337,12 +337,17 @@ def parse_decimal_field(value, unit=""):
     """Normalize grouping and an explicit unit without removing other digits/text."""
     if not value:
         return ""
-    number = r"(?:\d{1,3}(?:,\s*\d{3})+|\d{1,2}(?:,\s*\d{2})+,\s*\d{3}|\d+)(?:\.\d+)?"
+    # Spaces around the decimal point and a sentence-ending full stop do
+    # not add/remove digits. Never join whitespace-separated digit groups.
+    value = re.sub(r"(?<=\d)[ \t]*\.[ \t]*(?=\d)", ".", value.strip())
+    if re.fullmatch(r"\d+\.\d+\.", value):
+        value = value[:-1]
+    number = r"(?:\d{1,3}(?:,\s*\d{3})+|\d{1,2}(?:,\s*\d{2})+,\s*\d{3}|\d+)(?:\.\d*)?"
     prefix = r"(?:₹|Rs\.?|INR)?\s*" if unit == "amount" else ""
     suffixes = {"amount": r"(?:₹|Rs\.?|INR)?", "liters": r"(?:l|ltr|ltrs|liter|liters|litre|litres)?",
                 "average": r"(?:km\s*/\s*(?:l|ltr|liter|litre))?", "rate": r"(?:rs\.?\s*/\s*(?:l|ltr|liter|litre))?"}
     match = re.fullmatch(r"\s*" + prefix + "(" + number + r")\s*" + suffixes.get(unit, "") + r"\s*", value, re.IGNORECASE)
-    return re.sub(r"[,\s]", "", match.group(1)) if match else ""
+    return re.sub(r"[,\s]", "", match.group(1)).rstrip(".") if match else ""
 
 
 def bill_history_keys(entry):
@@ -657,6 +662,14 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
         present_raw = get_field("Present odo", text, strict=True)
         prev_raw = get_field("Previous odo", text, strict=True)
         diesel_amt_raw = get_field("Diesel amount", text, strict=True)
+        if not diesel_amt_raw:
+            # Observed report shorthand: "Diseal -5582.46.". Anchor the
+            # whole label so "Diseal liter" can never become an amount.
+            shorthand = re.findall(r"^[ \t]*(?:diesel|diseal)[ \t]*[-:][ \t]*([^\r\n]+)", text, re.IGNORECASE | re.MULTILINE)
+            if len(shorthand) > 1:
+                return None, ['Multiple bare Diesel/Diseal amount lines; clarify the source message']
+            if shorthand:
+                diesel_amt_raw = shorthand[0].strip()
         diesel_ltr_raw = get_field("Diesel liter", text, strict=True)
         avg_raw = get_field("Average", text, strict=True)
         supplied_total = get_field("Total KM", text, strict=True)

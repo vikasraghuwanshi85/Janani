@@ -149,6 +149,8 @@ Build `2026-10-27.2` supports reversed WhatsApp message lists (negative scroll p
 
 Build `2026-10-27.3` reads acknowledgement history before collecting images. `[BILL HISTORY SKIP]` means that exact WhatsApp message ID was already acknowledged and its image was never opened, even with `--force`. Text captions remain eligible for separate report validation. Recognised WhatsApp missing/download-unavailable dialogs are dismissed; that image is deferred for the rest of the run without being marked uploaded. Other transient image failures keep their bounded retry limit. Legacy history containing only image hashes cannot identify an attachment before downloading its bytes; missing originals still require the sender to resend them. Keep `pushed_history.json` so message-ID skips continue to work. No Apps Script redeployment is required for this Python update.
 
+Build `2026-10-27.4` accepts the observed fuel-amount shorthand `Diseal -3998.15` (or `Diesel -3998.15`), with a complete line-anchored label so liters cannot become an amount. It normalizes decimal-point spacing (`16. 35` → `16.35`) and terminal punctuation (`5582.46.` → `5582.46`, `18.` → `18`) without changing digits. Multiple bare amount lines and ambiguous numbers remain rejected; calculated-distance, average and rate checks still apply. No Apps Script redeployment is required.
+
 ## Development checks
 
 ```bat

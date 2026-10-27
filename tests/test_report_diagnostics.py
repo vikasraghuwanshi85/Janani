@@ -53,3 +53,31 @@ class ReportDiagnosticsTests(unittest.TestCase):
                 self.assertEqual(payload['diesel_liter'], liters)
                 self.assertEqual(payload['average'], average)
                 self.assertEqual(payload['total_km'], str(int(present) - int(previous)))
+
+    def test_logged_7412_shorthand_reports_preserve_all_digits(self):
+        for date, present, previous, amount, liters, average in [
+            ('24/10/26', '373924', '373271', '3998.15', '39.57', '16.50'),
+            ('22/10/26', '372740', '371821', '5582.46.', '55.25', '16.63'),
+            ('23/10/26', '373271', '372740', '3291.88', '32.58', '16.29'),
+        ]:
+            with self.subTest(date=date):
+                text = (f'Fuel msg-\nDate-{date}\nLocation-khargone DH\nVehicle no-7412\n'
+                        f'Present odo-{present}\nPrevious odo-{previous}\nDiseal -{amount}\n'
+                        f'Diseal liter-{liters}\nAverage-{average}\nPilot name-Raja\nPump Name-Aadeswar')
+                entry, errors = app.parse_message_debug(text)
+                self.assertIsNotNone(entry, errors)
+                self.assertEqual(entry['payload']['diesel_amount'], amount.rstrip('.'))
+                self.assertEqual(entry['payload']['diesel_liter'], liters)
+                self.assertEqual(entry['payload']['average'], average)
+
+    def test_decimal_spacing_and_sentence_punctuation(self):
+        for raw, expected in [('16. 35', '16.35'), ('17. 37', '17.37'), ('18.', '18'), ('5582.46.', '5582.46')]:
+            self.assertEqual(app.parse_decimal_field(raw, 'average'), expected)
+        for raw in ['16 35', '16.3.5', '18..', '16. 3 5', '1.2.3.', '18x']:
+            self.assertEqual(app.parse_decimal_field(raw, 'average'), '')
+
+    def test_bare_diesel_label_does_not_capture_liters(self):
+        text = fuel('361260', '360541').replace('Diesel amount - 4197.2\n', '')
+        entry, errors = app.parse_message_debug(text)
+        self.assertIsNone(entry)
+        self.assertIn('Diesel amount=<missing>', errors[0])
