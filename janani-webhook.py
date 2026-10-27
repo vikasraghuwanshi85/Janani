@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
-PYTHON_BUILD = '2026-10-24.6'
+PYTHON_BUILD = '2026-10-27.1'
 
 class WebhookProtocolError(RuntimeError):
     """The deployment did not return the JSON contract required for uploads."""
@@ -405,17 +405,25 @@ def select_entries_to_push(entries, history, force=False):
     for issue in issues:
         print('[SKIP] ' + issue + '; correct the source messages before retrying')
     selected, seen = ReportBatch(issues=issues), set()
+    history_count = duplicate_count = conflict_count = 0
     for entry in entries:
         if entry.get('type') == 'FUEL' and not entry.get('has_image') and entry['unique_key'] in conflicts:
+            conflict_count += 1
             continue
         keys = bill_history_keys(entry)
         identity = {fuel_content_key(entry)} if entry.get('type') == 'FUEL' and not entry.get('has_image') else keys
         if identity & seen:
+            duplicate_count += 1
             continue
         seen.update(identity)
         if already_pushed(entry, history) and (entry.get("has_image") or not force):
+            history_count += 1
+            print('[HISTORY SKIP] ' + entry['unique_key'] + ' (local acknowledgement; sheet presence not rechecked)')
             continue
         selected.append(entry)
+    selected.selection_counts = {'history': history_count, 'duplicates': duplicate_count, 'conflicts': conflict_count}
+    print(f'[SELECTION] Eligible: {len(entries)}; selected: {len(selected)}; local history: {history_count}; '
+          f'repeated in batch: {duplicate_count}; conflicting reports: {conflict_count}')
     return selected
 
 
@@ -670,7 +678,14 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
         average_val = parse_decimal_field(avg_raw, "average")
         if (not diesel_amt_clean or not diesel_ltr_clean
                 or (avg_raw and not average_val)):
-            return None, ["Missing or invalid diesel amount, liters or average; correct the source message"]
+            invalid_fields = []
+            for label, raw, normalized in (('Diesel amount', diesel_amt_raw, diesel_amt_clean),
+                                           ('Diesel liter', diesel_ltr_raw, diesel_ltr_clean),
+                                           ('Average', avg_raw, average_val)):
+                if (label != 'Average' or raw) and not normalized:
+                    invalid_fields.append(label + '=' + (repr(raw[:100]) if raw else '<missing>'))
+            return None, ['Missing or invalid diesel amount, liters or average: ' + '; '.join(invalid_fields)
+                          + '; correct the source message']
         rate_val = ""
         try:
             if diesel_amt_clean and diesel_ltr_clean:
@@ -691,7 +706,9 @@ def parse_message_debug(text, image_data="", original_text_for_vehicle="", debug
         if supplied_total and parse_odometer(supplied_total) != total_km:
             return None, ["Total KM does not match the odometer difference; correct the source message"]
         if avg_raw and abs(float(average_val) - int(total_km) / float(diesel_ltr_clean)) > 0.03:
-            return None, ["Average does not match Total KM / diesel liters; correct the source message"]
+            return None, [f'Average does not match Total KM / diesel liters: supplied={average_val}, '
+                          f'calculated={int(total_km) / float(diesel_ltr_clean):.2f} '
+                          f'({total_km} km / {diesel_ltr_clean} liters); correct the source message']
         if supplied_rate:
             parsed_rate = parse_decimal_field(supplied_rate, "rate")
             if not parsed_rate or abs(float(parsed_rate) - float(diesel_amt_clean) / float(diesel_ltr_clean)) > 0.02:
@@ -1580,6 +1597,8 @@ if __name__ == "__main__":
     print(f"History: {len(history)} entries")
     if not entries:
         print("[FAIL] No messages")
+        for issue in getattr(entries, 'scan_issues', []):
+            print('[REVIEW] ' + issue)
         print("[HINT] Try: python janani-webhook.py --days 1 --debug-fuel")
         sys.exit(1)
     else:
@@ -1588,7 +1607,7 @@ if __name__ == "__main__":
         for e in fuel_entries[:10]:
             p = e['payload']
             in_hist = "IN HISTORY (will skip unless --force)" if already_pushed(e, history) else "NEW"
-            print(f"  {e['date_folder']} ⛽ {p['vehicle']} | Present:{p['present_odo']} Prev:{p['previous_odo']} | {p['diesel_amount']}L | {in_hist} | key={e['unique_key'][:40]}")
+            print(f"  {e['date_folder']} ⛽ {p['vehicle']} | Present:{p['present_odo']} Prev:{p['previous_odo']} | Amount:{p['diesel_amount']} Liters:{p['diesel_liter']} | {in_hist} | key={e['unique_key']}")
         
         if FORCE_PUSH:
             to_push = select_entries_to_push(entries, history, force=True)
@@ -1596,7 +1615,7 @@ if __name__ == "__main__":
         else:
             to_push = select_entries_to_push(entries, history)
             print(f"\nNew to push: {len(to_push)} (Fuel: {sum(1 for e in to_push if e['payload'].get('type')=='FUEL')} + Bills: {sum(1 for e in to_push if e['payload'].get('has_image'))})")
-            print(f"Will SKIP {len(entries) - len(to_push)} already in history")
+            print(f"Will SKIP {to_push.selection_counts['history']} already in local history")
             if len(to_push) == 0:
                 print("\n⚠️ No new entries! If you have new fuel entry but it's not pushing:")
                 print("  1. It might already be in pushed_history.json with same key")

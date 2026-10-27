@@ -143,6 +143,8 @@ The collector counts distinct messages separately from image retries, uses the r
 
 Result counts are separate: **Confirmed** records have an acknowledged response and saved history; **upload unconfirmed** records lack that confirmation; **not processed** records remain after an interrupted batch. Rejected text reports appear under SKIP/REVIEW with their date, vehicle and source message ID. OCR holds no longer exist. Records outside the window are filtered before validation.
 
+Build `2026-10-27.1` logs `[HISTORY SKIP]` with each skipped record's complete key and `[SELECTION]` with separate counts for local history, repeated records and conflicts. History is a local acknowledgement, not a live check that the row still exists. Numeric rejections identify the exact missing/invalid field and its supplied value; average mismatches show the supplied and calculated values. The preview labels amount and liters separately. If messages seem missing, compare their date/vehicle/odometer key against these lines and SKIP/REVIEW; keep history intact. Correct invalid source values and rerun the same scan window. The uploader will retry rejected reports because they have no successful acknowledgement.
+
 ## Development checks
 
 ```bat

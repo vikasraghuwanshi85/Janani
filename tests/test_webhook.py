@@ -213,7 +213,7 @@ class DedupTests(unittest.TestCase):
         entry = app.parse_message(fuel('361260', '360541'))
         with patch('builtins.print') as output:
             self.assertEqual(app.select_entries_to_push([entry], {entry['unique_key']}), [])
-        self.assertIn('Legacy fuel record', output.call_args.args[0])
+        self.assertTrue(any('Legacy fuel record' in str(call.args[0]) for call in output.call_args_list if call.args))
 
     def test_history_roundtrip_and_corruption(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(app, 'HISTORY_FILE', str(Path(directory) / 'history.json')):
@@ -344,10 +344,12 @@ class WebhookDeploymentTests(unittest.TestCase):
     def test_html_upload_stops_batch_preserves_history_and_fails_schedule(self):
         entry = bill()
         history = set()
+        pending = app.ReportBatch([entry, entry])
+        pending.selection_counts = {'history': 0, 'duplicates': 0, 'conflicts': 0}
         namespace = dict(app.__dict__, __name__='__main__', FORCE_PUSH=False,
                          check_webhook=lambda: None, read_last_n_days=lambda **kwargs: ([entry, entry], history),
                          acquire_push_lock=lambda: Mock(), save_history=Mock(),
-                         select_entries_to_push=lambda *args, **kwargs: [entry, entry])
+                         select_entries_to_push=lambda *args, **kwargs: pending)
         with patch.object(app.requests, 'post', return_value=self.response('<html>Script function not found: doPost</html>')) as post, patch('builtins.print'), self.assertRaises(SystemExit) as error:
             self.run_main(namespace)
         self.assertEqual(error.exception.code, 1)
