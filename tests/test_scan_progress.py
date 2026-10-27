@@ -42,7 +42,7 @@ class ScanProgressTests(TestCase):
         self.assertEqual(set(collected), {'bill-1'})
         self.assertEqual(driver.execute_async_script.call_count, 3)
         self.assertEqual(driver.execute_script.call_count, 5)
-        self.assertFalse(collected.scan_incomplete)
+        self.assertTrue(collected.scan_incomplete)
         scroll_logs = [call.args[0] for call in output.call_args_list if call.args and str(call.args[0]).startswith('  Scroll ')]
         self.assertIn('Found 1 new messages', scroll_logs[0])
         self.assertTrue(all('Found 0 new messages' in text for text in scroll_logs[1:]))
@@ -103,6 +103,21 @@ class ScanProgressTests(TestCase):
 
     def test_all_mode_does_not_stop_at_daily_window(self):
         collected, driver, output = self.collect([[message('old', '01/01/2020', False)]], days=3650)
-        self.assertFalse(collected.scan_incomplete)
+        self.assertTrue(collected.scan_incomplete)
         self.assertEqual(driver.execute_script.call_count, 5)
         self.assertFalse(any('older than the requested scan window' in str(call.args[0]) for call in output.call_args_list if call.args))
+
+    def test_negative_scroll_positions_count_as_older_movement(self):
+        progress = {'found': True, 'before': 0, 'top': -160, 'atTop': False, 'reversed': True}
+        collected, driver, _ = self.collect([
+            [message('new', '24/10/2026', False)],
+            [message('old', '08/10/2026', False)],
+            [message('older', '07/10/2026', False)],
+        ], progress=progress)
+        self.assertEqual(driver.execute_script.call_count, 3)
+        self.assertFalse(collected.scan_incomplete)
+
+    def test_loaded_edge_never_claims_full_all_history(self):
+        collected, driver, _ = self.collect([[message(image=False)]], days=3650)
+        self.assertTrue(collected.scan_incomplete)
+        self.assertTrue(any('edge of the loaded' in issue for issue in collected.scan_issues))

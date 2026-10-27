@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
-PYTHON_BUILD = '2026-10-27.1'
+PYTHON_BUILD = '2026-10-27.2'
 
 class WebhookProtocolError(RuntimeError):
     """The deployment did not return the JSON contract required for uploads."""
@@ -183,7 +183,7 @@ MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec
 DEFAULT_DAYS = 15
 DAYS_TO_SCAN = DEFAULT_DAYS
 DEBUG_MODE = "--debug" in sys.argv
-DEBUG_FUEL = "--debug-fuel" in sys.argv
+DEBUG_FUEL = DEBUG_MODE or "--debug-fuel" in sys.argv
 FORCE_PUSH = "--force" in sys.argv
 
 has_all_flag = "--all" in sys.argv
@@ -1073,25 +1073,42 @@ def move_whatsapp_history(driver, direction='older'):
         const direction = arguments[0];
         const main = document.querySelector('#main') || document.querySelector('[data-testid="conversation-panel-messages"]');
         if(!main) return {found: false};
-        let preferred = main.querySelector('[data-testid="conversation-panel-messages"]') || main;
+        const preferred = main.querySelector('[data-testid="conversation-panel-messages"]') || main;
+        const anchor = preferred.querySelector('[data-id], [data-testid="msg-container"], .message-in, .message-out');
         let candidates = [];
-        for(let node = preferred; node; node = node.parentElement) {
+        // Prefer the actual message's scroll ancestors, not a surrounding panel
+        // or a scrollable header/sidebar in the conversation layout.
+        for(let node = anchor ? anchor.parentElement : preferred; node; node = node.parentElement) {
             candidates.push(node);
             if(node === main || node === document.body) break;
         }
-        candidates.push(...main.querySelectorAll('div'));
-        let scroll = candidates.find(node => {
-            let style = getComputedStyle(node);
+        candidates.push(preferred, ...main.querySelectorAll('div'));
+        const scroll = candidates.find(node => {
+            const style = getComputedStyle(node);
             return node.clientHeight > 0 && node.scrollHeight > node.clientHeight + 1
-                && /auto|scroll/.test(style.overflowY);
+                && /auto|scroll/.test(style.overflowY)
+                && (!anchor || node.contains(anchor));
         });
         if(!scroll) return {found: false};
-        let before = scroll.scrollTop;
-        scroll.scrollTop = direction === 'newest' ? scroll.scrollHeight
-            : Math.max(0, before - Math.max(100, scroll.clientHeight * 0.8));
-        return {found: true, before: before, top: scroll.scrollTop,
+        const before = scroll.scrollTop;
+        const behavior = scroll.style.scrollBehavior;
+        scroll.style.scrollBehavior = 'auto';
+        // Reversed flex message lists use negative scrollTop. Zero is NEWEST,
+        // so clamping every older movement to zero leaves the chat stuck.
+        scroll.scrollTop = -1;
+        const reversed = scroll.scrollTop < 0;
+        scroll.scrollTop = before;
+        const extent = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+        const oldest = reversed ? -extent : 0;
+        const newest = reversed ? 0 : extent;
+        scroll.scrollTop = direction === 'newest' ? newest
+            : Math.max(oldest, before - Math.max(100, scroll.clientHeight * 0.8));
+        const top = scroll.scrollTop;
+        scroll.dispatchEvent(new Event('scroll', {bubbles: true}));
+        scroll.style.scrollBehavior = behavior;
+        return {found: true, before: before, top: top, reversed: reversed,
             height: scroll.scrollHeight, viewport: scroll.clientHeight,
-            atTop: scroll.scrollTop <= 1};
+            atTop: Math.abs(top - oldest) <= 1};
     """, direction)
 
 def scroll_and_collect_with_image_fix(driver, days=30):
@@ -1406,6 +1423,8 @@ const searchText = arguments[0], messageId = arguments[2];
             previous_batch_latest = latest_in_batch
 
             progress = move_whatsapp_history(driver)
+            if DEBUG_MODE:
+                print('[SCROLL] ' + json.dumps(progress, ensure_ascii=False))
             consecutive_errors = 0
             moved_older = bool(progress.get('found') and progress.get('before', 0) > progress.get('top', 0))
             time.sleep(2.5 if IS_WIN8_FAMILY else 1.5)
@@ -1417,7 +1436,8 @@ const searchText = arguments[0], messageId = arguments[2];
                 stop_whatsapp_scan(collected, 'WhatsApp history stopped moving before the beginning of the conversation; retry the incomplete scan')
                 break
             if empty_passes >= 4 and progress.get('atTop'):
-                reached_start = True
+                stop_whatsapp_scan(collected, 'Reached the edge of the loaded WhatsApp messages without proving the requested history is complete. '
+                                   'Older messages may not have loaded; open the group, load older history and retry. No history was cleared.')
                 break
                 
         except Exception as e:

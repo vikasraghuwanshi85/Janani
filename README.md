@@ -145,6 +145,8 @@ Result counts are separate: **Confirmed** records have an acknowledged response 
 
 Build `2026-10-27.1` logs `[HISTORY SKIP]` with each skipped record's complete key and `[SELECTION]` with separate counts for local history, repeated records and conflicts. History is a local acknowledgement, not a live check that the row still exists. Numeric rejections identify the exact missing/invalid field and its supplied value; average mismatches show the supplied and calculated values. The preview labels amount and liters separately. If messages seem missing, compare their date/vehicle/odometer key against these lines and SKIP/REVIEW; keep history intact. Correct invalid source values and rerun the same scan window. The uploader will retry rejected reports because they have no successful acknowledgement.
 
+Build `2026-10-27.2` supports reversed WhatsApp message lists (negative scroll positions), selects the messages' scroll ancestor before surrounding panels, and makes `--debug` enable fuel diagnostics as well as `[SCROLL]` position logs. Run `py janani-webhook.py --all --debug` for a history diagnostic. Reaching the edge of loaded messages alone cannot prove that WhatsApp supplied all earlier history; it now reports an incomplete scan and exits with code 1, retaining collected reports and acknowledgement history. A daily scan can confirm completion after passing its date boundary. Open the group and load older messages in the Janani Chrome session before retrying if WhatsApp does not load them automatically. An all-history run can conservatively report incomplete even at the real beginning because that boundary cannot be verified from scroll position alone.
+
 ## Development checks
 
 ```bat

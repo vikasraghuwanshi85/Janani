@@ -226,3 +226,35 @@ class WhatsAppDateTests(unittest.TestCase):
         result = self.read_full_media()
         self.assertEqual(result['image_data'], '')
         self.assertFalse(self.driver.find_elements('css selector', '[role="dialog"]'))
+
+    def test_reverse_message_list_scrolls_negative_to_older_history(self):
+        from test_webhook import app
+        self.driver.get('about:blank')
+        self.driver.execute_script('document.body.innerHTML=arguments[0]',
+            '<div id="main"><div id="viewport" style="height:200px;overflow-y:auto;display:flex;flex-direction:column-reverse">'
+            + ''.join('<div data-id="m%d" style="min-height:100px">Message %d</div>' % (i, i) for i in range(20))
+            + '</div></div>')
+        newest = app.move_whatsapp_history(self.driver, 'newest')
+        older = app.move_whatsapp_history(self.driver)
+        self.assertEqual(newest['top'], 0)
+        self.assertTrue(older['reversed'])
+        self.assertLess(older['top'], 0)
+        self.assertFalse(older['atTop'])
+        for _ in range(20):
+            edge = app.move_whatsapp_history(self.driver)
+        self.assertTrue(edge['atTop'])
+        self.assertEqual(edge['top'], -(edge['height'] - edge['viewport']))
+
+    def test_message_viewport_selected_over_scrollable_surrounding_panel(self):
+        from test_webhook import app
+        self.driver.get('about:blank')
+        self.driver.execute_script('document.body.innerHTML=arguments[0]',
+            '<div id="main" style="height:300px;overflow-y:auto">'
+            '<div style="height:600px">Header</div>'
+            '<div id="viewport" style="height:200px;overflow-y:auto">'
+            '<div data-id="report" style="height:2000px">Date-27/10/26 Vehicle-7412</div>'
+            '</div></div>')
+        newest = app.move_whatsapp_history(self.driver, 'newest')
+        self.assertEqual(newest['viewport'], 200)
+        self.assertEqual(newest['top'], 1800)
+        self.assertEqual(self.driver.execute_script("return document.querySelector('#main').scrollTop"), 0)
